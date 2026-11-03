@@ -1,0 +1,13 @@
+﻿Report Builder load test
+Started: 20260930-165022
+API: https://mecs.dmt.gov.ae/ReportBuilder/api
+Report: 8ac68a1b-5f29-411f-bd93-7dcf05055198
+Users: 100
+Requests per user: 10
+Total requests: 1000
+Succeeded: 0
+Failed: 1000
+Min ms: 0
+Average ms: 0
+P95 ms: 0
+Max ms: 0

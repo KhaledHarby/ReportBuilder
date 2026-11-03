@@ -1,0 +1,13 @@
+bin/
+obj/
+logs/
+.vs/
+*.user
+wwwroot/
+
+node_modules/
+dist/
+*.local
+
+.idea/
+.DS_Store

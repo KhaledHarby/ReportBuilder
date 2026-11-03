@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests" />
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Engineering Classification · Report Builder</title>
+    <script src="%BASE_URL%config.js"></script>
+    <script>
+      (() => {
+        const stored = localStorage.getItem('lumen-theme')
+        const themes = ['light', 'dark', 'sand', 'palm', 'ruby', 'ellen']
+        const theme = themes.includes(stored) ? stored : 'ellen'
+        document.documentElement.dataset.theme = theme
+        const lang =
+          localStorage.getItem('rb.lang') || localStorage.getItem('rb.loginLang')
+        if (lang === 'ar') {
+          document.documentElement.lang = 'ar'
+          document.documentElement.dir = 'rtl'
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

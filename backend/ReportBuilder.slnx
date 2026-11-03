@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ReportBuilder.Api/ReportBuilder.Api.csproj" />
+    <Project Path="src/ReportBuilder.Core/ReportBuilder.Core.csproj" />
+    <Project Path="src/ReportBuilder.Infrastructure/ReportBuilder.Infrastructure.csproj" />
+  </Folder>
+</Solution>
