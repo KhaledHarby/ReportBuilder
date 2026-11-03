@@ -436,6 +436,9 @@ export const en = {
   scheduleTitle: 'Schedule',
   scheduleHint: 'Send the published report by mail. Daily, weekly, or monthly, at a time in Asia/Dubai.',
   scheduleEnabled: 'Send on this schedule',
+  scheduleSendOnlyIfRows: 'Send only when the report has at least one row',
+  scheduleSendOnlyIfRowsHint:
+    'An empty result is not mailed. The run is recorded as skipped. When each person receives their own rows, only people with at least one row are mailed.',
   scheduleCadence: 'Repeat',
   scheduleDaily: 'Daily',
   scheduleWeekly: 'Weekly',
@@ -1751,6 +1754,9 @@ export const ar: Record<MessageKey, string> = {
   scheduleTitle: 'الجدولة',
   scheduleHint: 'إرسال التقرير المنشور بالبريد. يومياً أو أسبوعياً أو شهرياً، في وقت بتوقيت دبي.',
   scheduleEnabled: 'الإرسال حسب هذا الجدول',
+  scheduleSendOnlyIfRows: 'الإرسال فقط عندما يحتوي التقرير على صف واحد على الأقل',
+  scheduleSendOnlyIfRowsHint:
+    'لا يُرسل البريد إذا كانت النتيجة فارغة، وتُسجَّل العملية كمتجاوَزة. عندما يستلم كل شخص صفوفه فقط، يُرسل البريد لمن لديه صف واحد على الأقل.',
   scheduleCadence: 'التكرار',
   scheduleDaily: 'يومي',
   scheduleWeekly: 'أسبوعي',

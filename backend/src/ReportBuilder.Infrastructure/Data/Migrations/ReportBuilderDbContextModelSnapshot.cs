@@ -1071,6 +1071,9 @@ namespace ReportBuilder.Infrastructure.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
 
+                    b.Property<bool>("SendOnlyIfRows")
+                        .HasColumnType("bit");
+
                     b.Property<Guid?>("SmtpProfileId")
                         .HasColumnType("uniqueidentifier");
 

@@ -142,7 +142,7 @@ public sealed partial class MongoCacheClient
         return table;
     }
 
-    public async Task WriteCsvAsync(
+    public async Task<int> WriteCsvAsync(
         CacheProviderConnection connection,
         string collectionName,
         Dataset dataset,
@@ -176,19 +176,15 @@ public sealed partial class MongoCacheClient
             included.Select(item => item.Selection.ResultName).ToList(),
             cancellationToken);
 
-        if (plan.Grouping)
-        {
-            await WriteGroupedCsvAsync(collection, shape, plan, included, layout, writer, cancellationToken);
-        }
-        else
-        {
-            await WriteFindCsvAsync(collection, shape, plan, included, layout, writer, cancellationToken);
-        }
+        var rows = plan.Grouping
+            ? await WriteGroupedCsvAsync(collection, shape, plan, included, layout, writer, cancellationToken)
+            : await WriteFindCsvAsync(collection, shape, plan, included, layout, writer, cancellationToken);
 
         await writer.FlushAsync(cancellationToken);
+        return rows;
     }
 
-    private async Task WriteFindCsvAsync(
+    private async Task<int> WriteFindCsvAsync(
         IMongoCollection<BsonDocument> collection,
         CacheShape shape,
         DocumentQueryPlan plan,
@@ -217,7 +213,8 @@ public sealed partial class MongoCacheClient
             .Project(projection);
 
         using var cursor = await find.ToCursorAsync(cancellationToken);
-        var written = 0;
+        var total = 0;
+        var sinceFlush = 0;
         while (await cursor.MoveNextAsync(cancellationToken))
         {
             foreach (var document in cursor.Current)
@@ -233,18 +230,21 @@ public sealed partial class MongoCacheClient
                 }
 
                 await ReportExportWriter.WriteCsvRecordAsync(writer, cells, cancellationToken);
-                written++;
+                total++;
+                sinceFlush++;
             }
 
-            if (written >= ExportFlushRows)
+            if (sinceFlush >= ExportFlushRows)
             {
                 await writer.FlushAsync(cancellationToken);
-                written = 0;
+                sinceFlush = 0;
             }
         }
+
+        return total;
     }
 
-    private async Task WriteGroupedCsvAsync(
+    private async Task<int> WriteGroupedCsvAsync(
         IMongoCollection<BsonDocument> collection,
         CacheShape shape,
         DocumentQueryPlan plan,
@@ -264,7 +264,8 @@ public sealed partial class MongoCacheClient
             },
             cancellationToken);
 
-        var written = 0;
+        var total = 0;
+        var sinceFlush = 0;
         while (await cursor.MoveNextAsync(cancellationToken))
         {
             foreach (var document in cursor.Current)
@@ -280,15 +281,18 @@ public sealed partial class MongoCacheClient
                 }
 
                 await ReportExportWriter.WriteCsvRecordAsync(writer, cells, cancellationToken);
-                written++;
+                total++;
+                sinceFlush++;
             }
 
-            if (written >= ExportFlushRows)
+            if (sinceFlush >= ExportFlushRows)
             {
                 await writer.FlushAsync(cancellationToken);
-                written = 0;
+                sinceFlush = 0;
             }
         }
+
+        return total;
     }
 
     private const int ExportFlushRows = 5_000;
