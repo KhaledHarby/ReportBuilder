@@ -32,6 +32,7 @@ export function ReportScheduleMail({ reportId }: { reportId: string }) {
     queryFn: () => api.getReportSchedule(reportId),
   })
   const [enabled, setEnabled] = useState(false)
+  const [sendOnlyIfRows, setSendOnlyIfRows] = useState(false)
   const [cadence, setCadence] = useState('Daily')
   const [dayOfWeek, setDayOfWeek] = useState(1)
   const [dayOfMonth, setDayOfMonth] = useState(1)
@@ -62,6 +63,7 @@ export function ReportScheduleMail({ reportId }: { reportId: string }) {
       return
     }
     setEnabled(data.enabled)
+    setSendOnlyIfRows(data.sendOnlyIfRows === true)
     setCadence(data.cadence || 'Daily')
     setDayOfWeek(data.dayOfWeek ?? 1)
     setDayOfMonth(data.dayOfMonth ?? 1)
@@ -94,6 +96,7 @@ export function ReportScheduleMail({ reportId }: { reportId: string }) {
         emails: schedule.data?.userScoped || scopeField ? [] : emails,
         scopeField: scopeField || null,
         scopeProperty: scopeField ? scopeProperty : null,
+        sendOnlyIfRows,
       }
       return api.saveReportSchedule(reportId, body)
     },
@@ -116,6 +119,9 @@ export function ReportScheduleMail({ reportId }: { reportId: string }) {
       if (latest?.status === 'Sent') {
         setError(null)
         setNotice(t('scheduleSent'))
+      } else if (latest?.status === 'Skipped') {
+        setError(null)
+        setNotice(latest.message || t('scheduleRunSkipped'))
       } else {
         setNotice(null)
         setError(latest?.message || t('scheduleRunFailed'))
@@ -241,6 +247,15 @@ export function ReportScheduleMail({ reportId }: { reportId: string }) {
           <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
           {t('scheduleEnabled')}
         </label>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={sendOnlyIfRows}
+            onChange={(event) => setSendOnlyIfRows(event.target.checked)}
+          />
+          {t('scheduleSendOnlyIfRows')}
+        </label>
+        <p className="muted small">{t('scheduleSendOnlyIfRowsHint')}</p>
         <div className="schedule-grid">
           <Field label={t('scheduleCadence')}>
             <select value={cadence} onChange={(event) => setCadence(event.target.value)}>

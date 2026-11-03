@@ -28,6 +28,7 @@ public sealed class ReportQueryService : IReportQueryService
     private ICurrentUser? _exportActor;
     private UserScope? _deliveryScope;
     private bool _exportTruncated;
+    private int _exportRowCount;
     private bool _stampExportTitles;
     private string? _exportEnglishTitle;
     private string? _exportArabicTitle;
@@ -550,7 +551,7 @@ public sealed class ReportQueryService : IReportQueryService
             _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty
         };
 
-    public async Task<bool> WriteExportForAsync(
+    public async Task<ReportExportOutcome> WriteExportForAsync(
         Guid templateId,
         string reportName,
         ReportExportFormat format,
@@ -563,10 +564,11 @@ public sealed class ReportQueryService : IReportQueryService
         _exportActor = actor;
         _deliveryScope = deliveryScope;
         _exportTruncated = false;
+        _exportRowCount = 0;
         try
         {
             await WriteExportAsync(templateId, reportName, format, output, lang, cancellationToken);
-            return _exportTruncated;
+            return new ReportExportOutcome(_exportTruncated, _exportRowCount);
         }
         finally
         {
@@ -676,7 +678,7 @@ public sealed class ReportQueryService : IReportQueryService
         {
             if (format == ReportExportFormat.Csv)
             {
-                await _mongo.WriteCsvAsync(
+                _exportRowCount = await _mongo.WriteCsvAsync(
                     mongo.Connection,
                     mongo.Collection,
                     dataset,
@@ -828,6 +830,7 @@ public sealed class ReportQueryService : IReportQueryService
         Stream output,
         CancellationToken cancellationToken)
     {
+        _exportRowCount = table.Rows.Count;
         if (_stampExportTitles)
         {
             table = WithTitles(table, _exportEnglishTitle, _exportArabicTitle);

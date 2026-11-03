@@ -27,6 +27,7 @@ public sealed class ReportScheduleModel
     public bool UserScoped { get; set; }
     public string? ScopeField { get; set; }
     public string? ScopeProperty { get; set; }
+    public bool SendOnlyIfRows { get; set; }
     public List<ReportScheduleScopeColumn> ScopeColumns { get; set; } = [];
     public bool Published { get; set; }
     public DateTimeOffset? NextRunAt { get; set; }
@@ -52,6 +53,7 @@ public sealed class ReportScheduleWrite
     public List<string> Emails { get; set; } = [];
     public string? ScopeField { get; set; }
     public string? ScopeProperty { get; set; }
+    public bool SendOnlyIfRows { get; set; }
 }
 
 public sealed class ReportScheduleScopeColumn

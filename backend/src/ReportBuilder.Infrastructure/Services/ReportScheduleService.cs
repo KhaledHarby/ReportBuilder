@@ -120,6 +120,7 @@ public sealed class ReportScheduleService : IReportScheduleService
         schedule.Language = language;
         schedule.ScopeField = scope.Field;
         schedule.ScopeProperty = scope.Property;
+        schedule.SendOnlyIfRows = request.SendOnlyIfRows;
         schedule.SmtpProfileId = request.SmtpProfileId;
         schedule.EmailTemplateId = request.EmailTemplateId;
         schedule.OwnerUserId = _currentUser.UserId;
@@ -452,6 +453,7 @@ public sealed class ReportScheduleService : IReportScheduleService
             UserScoped = IsUserScoped(report),
             ScopeField = schedule?.ScopeField,
             ScopeProperty = schedule?.ScopeProperty,
+            SendOnlyIfRows = schedule?.SendOnlyIfRows ?? false,
             ScopeColumns = scopeColumns.ToList(),
             Published = report.Status == ReportStatus.Published,
             NextRunAt = schedule?.NextRunAt,

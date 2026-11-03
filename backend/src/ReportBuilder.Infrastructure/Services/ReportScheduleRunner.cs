@@ -216,12 +216,19 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
                 notes.Add("Added addresses were skipped because each person receives only their own rows.");
             }
 
+            var skippedEmpty = 0;
             foreach (var user in users)
             {
                 ExportFile? file = null;
                 try
                 {
                     file = await ExportAsync(report, reportName, format, AccountUser.From(user), schedule.Language, cancellationToken, deliveryScope);
+                    if (SkipEmpty(schedule, file))
+                    {
+                        skippedEmpty++;
+                        continue;
+                    }
+
                     await SendFileAsync(profile, mailTemplate, branding, logo, owner, user, report, reportName, format, schedule.Language, file, includeLink: true, cancellationToken);
                     sent++;
                 }
@@ -234,6 +241,8 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
                     file?.Dispose();
                 }
             }
+
+            NoteSkippedEmpty(notes, skippedEmpty);
         }
         else
         {
@@ -241,63 +250,70 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
             var file = await ExportAsync(report, reportName, format, ownerActor, schedule.Language, cancellationToken);
             try
             {
-                var skippedAdded = new List<string>();
-                foreach (var user in users)
+                if (SkipEmpty(schedule, file))
                 {
-                    try
-                    {
-                        await SendFileAsync(profile, mailTemplate, branding, logo, owner, user, report, reportName, format, schedule.Language, file, includeLink: true, cancellationToken);
-                        sent++;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        notes.Add(Trim(ex.Message) ?? "Mail was not sent.");
-                    }
+                    notes.Add("The report has no rows, so it was not sent.");
                 }
-
-                foreach (var recipient in schedule.Recipients)
+                else
                 {
-                    if (recipient.UserId is not null || recipient.RoleId is not null || string.IsNullOrWhiteSpace(recipient.Email))
+                    var skippedAdded = new List<string>();
+                    foreach (var user in users)
                     {
-                        continue;
+                        try
+                        {
+                            await SendFileAsync(profile, mailTemplate, branding, logo, owner, user, report, reportName, format, schedule.Language, file, includeLink: true, cancellationToken);
+                            sent++;
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            notes.Add(Trim(ex.Message) ?? "Mail was not sent.");
+                        }
                     }
 
-                    if (file.Length > MaxAttachmentBytes)
+                    foreach (var recipient in schedule.Recipients)
                     {
-                        skippedAdded.Add(recipient.Email);
-                        continue;
+                        if (recipient.UserId is not null || recipient.RoleId is not null || string.IsNullOrWhiteSpace(recipient.Email))
+                        {
+                            continue;
+                        }
+
+                        if (file.Length > MaxAttachmentBytes)
+                        {
+                            skippedAdded.Add(recipient.Email);
+                            continue;
+                        }
+
+                        try
+                        {
+                            await SendFileAsync(profile, mailTemplate, branding, logo, owner, null, report, reportName, format, schedule.Language, file, includeLink: false, cancellationToken, recipient.Email);
+                            sent++;
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            notes.Add(Trim(ex.Message) ?? "Mail was not sent.");
+                        }
                     }
 
-                    try
+                    if (skippedAdded.Count > 0)
                     {
-                        await SendFileAsync(profile, mailTemplate, branding, logo, owner, null, report, reportName, format, schedule.Language, file, includeLink: false, cancellationToken, recipient.Email);
-                        sent++;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        notes.Add(Trim(ex.Message) ?? "Mail was not sent.");
-                    }
-                }
-
-                if (skippedAdded.Count > 0)
-                {
-                    notes.Add("The file was larger than 10 MB, so added addresses were not mailed.");
-                    if (!string.IsNullOrWhiteSpace(owner.Email))
-                    {
-                        var notice = arabic
-                            ? $"حجم الملف أكبر من 10 ميغابايت، لذلك لم يُرسل إلى العناوين المضافة:\n{string.Join("\n", skippedAdded)}\nمن يمكنهم فتح التقرير استلموا رابطاً."
-                            : $"The file was larger than 10 MB, so it was not mailed to added addresses:\n{string.Join("\n", skippedAdded)}\nPeople who can open the report received a link.";
-                        await SmtpMailSender.SendAsync(
-                            profile,
-                            owner.Email,
-                            reportName,
-                            notice,
-                            null,
-                            null,
-                            null,
-                            cancellationToken,
-                            _log,
-                            MailOf(report, owner, owner, owner.Email));
+                        notes.Add("The file was larger than 10 MB, so added addresses were not mailed.");
+                        if (!string.IsNullOrWhiteSpace(owner.Email))
+                        {
+                            var notice = arabic
+                                ? $"حجم الملف أكبر من 10 ميغابايت، لذلك لم يُرسل إلى العناوين المضافة:\n{string.Join("\n", skippedAdded)}\nمن يمكنهم فتح التقرير استلموا رابطاً."
+                                : $"The file was larger than 10 MB, so it was not mailed to added addresses:\n{string.Join("\n", skippedAdded)}\nPeople who can open the report received a link.";
+                            await SmtpMailSender.SendAsync(
+                                profile,
+                                owner.Email,
+                                reportName,
+                                notice,
+                                null,
+                                null,
+                                null,
+                                cancellationToken,
+                                _log,
+                                MailOf(report, owner, owner, owner.Email));
+                        }
                     }
                 }
             }
@@ -328,7 +344,7 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
         var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 65536, FileOptions.DeleteOnClose);
         try
         {
-            var truncated = await _queries.WriteExportForAsync(
+            var outcome = await _queries.WriteExportForAsync(
                 report.Id,
                 reportName,
                 format,
@@ -346,7 +362,7 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
                 await stream.ReadExactlyAsync(bytes, cancellationToken);
             }
 
-            return new ExportFile(stream, bytes, length, truncated, SafeFileName(AttachmentName(report)) + Extension(format));
+            return new ExportFile(stream, bytes, length, outcome.Truncated, outcome.RowCount, SafeFileName(AttachmentName(report)) + Extension(format));
         }
         catch
         {
@@ -747,6 +763,21 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
         return text.Length <= 1000 ? text : text[..1000];
     }
 
+    private static bool SkipEmpty(ReportSchedule schedule, ExportFile file)
+        => schedule.SendOnlyIfRows && file.RowCount < 1;
+
+    private static void NoteSkippedEmpty(List<string> notes, int skippedEmpty)
+    {
+        if (skippedEmpty < 1)
+        {
+            return;
+        }
+
+        notes.Add(skippedEmpty == 1
+            ? "1 person was not mailed because their report had no rows."
+            : $"{skippedEmpty} people were not mailed because their report had no rows.");
+    }
+
     private static string AttachmentName(ReportTemplate report)
     {
         var english = report.Name?.Trim() ?? "";
@@ -773,18 +804,20 @@ public sealed class ReportScheduleRunner : IReportScheduleRunner
     {
         private readonly FileStream _stream;
 
-    public ExportFile(FileStream stream, byte[]? bytes, long length, bool truncated, string fileName)
+        public ExportFile(FileStream stream, byte[]? bytes, long length, bool truncated, int rowCount, string fileName)
         {
             _stream = stream;
             Bytes = bytes;
             Length = length;
             Truncated = truncated;
+            RowCount = rowCount;
             FileName = fileName;
         }
 
         public byte[]? Bytes { get; }
         public long Length { get; }
         public bool Truncated { get; }
+        public int RowCount { get; }
         public string FileName { get; }
 
         public void Dispose() => _stream.Dispose();

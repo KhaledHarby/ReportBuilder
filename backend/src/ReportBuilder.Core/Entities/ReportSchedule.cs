@@ -16,6 +16,8 @@ public class ReportSchedule
     public string? ScopeField { get; set; }
     /// <summary>id, userName, or email.</summary>
     public string? ScopeProperty { get; set; }
+    /// <summary>When set, mail is sent only if the export contains at least one data row.</summary>
+    public bool SendOnlyIfRows { get; set; }
     public Guid? OwnerUserId { get; set; }
     public DateTimeOffset? NextRunAt { get; set; }
     public DateTimeOffset? LastRunAt { get; set; }

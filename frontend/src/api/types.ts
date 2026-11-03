@@ -664,6 +664,7 @@ export type ReportSchedule = {
   userScoped: boolean
   scopeField?: string | null
   scopeProperty?: string | null
+  sendOnlyIfRows: boolean
   scopeColumns: ReportScheduleScopeColumn[]
   published: boolean
   nextRunAt?: string | null
@@ -688,6 +689,7 @@ export type ReportScheduleWrite = {
   emails: string[]
   scopeField?: string | null
   scopeProperty?: string | null
+  sendOnlyIfRows: boolean
 }
 
 export type ReportScheduleScopeColumn = {
