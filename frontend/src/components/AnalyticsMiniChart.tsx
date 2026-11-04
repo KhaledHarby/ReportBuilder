@@ -6,6 +6,8 @@ import {
 } from 'echarts/charts'
 import {
   GridComponent,
+  LegendComponent,
+  MarkAreaComponent,
   TooltipComponent,
 } from 'echarts/components'
 import { init, use as useEcharts, type ECharts } from 'echarts/core'
@@ -15,10 +17,20 @@ import type { AnalyticsChartResult } from '../api/types'
 import { IconDrill } from './Icons'
 import { registerChartCapture } from '../lib/analyticsCapture'
 import { ANALYTICS_NULL } from '../lib/analyticsFilters'
+import { formatPointMetric } from '../lib/analyticsBoard'
 import { useLocale } from '../i18n/LocaleProvider'
 import { localeFor } from '../i18n/locale'
 
-useEcharts([BarChart, LineChart, PieChart, GridComponent, TooltipComponent, CanvasRenderer])
+useEcharts([
+  BarChart,
+  LineChart,
+  PieChart,
+  GridComponent,
+  LegendComponent,
+  MarkAreaComponent,
+  TooltipComponent,
+  CanvasRenderer,
+])
 
 type Props = {
   chart: AnalyticsChartResult
@@ -29,6 +41,11 @@ type Props = {
   hostClassName?: string
   onExplore?: () => void
   exploreLabel?: string
+  tone?: 'accent' | 'selected'
+  legend?: boolean
+  seriesName?: string
+  compareSeries?: { name: string; points: { value: string; metric: number }[] } | null
+  axisFormat?: string | null
 }
 
 export function AnalyticsMiniChart({
@@ -40,6 +57,11 @@ export function AnalyticsMiniChart({
   hostClassName,
   onExplore,
   exploreLabel,
+  tone = 'accent',
+  legend = false,
+  seriesName,
+  compareSeries,
+  axisFormat,
 }: Props) {
   const { lang } = useLocale()
   const hostRef = useRef<HTMLDivElement>(null)
@@ -82,12 +104,34 @@ export function AnalyticsMiniChart({
             label: { color: text, fontSize: 11 },
           },
         ],
-      }
+      } as EChartsOption
     }
 
+    const toneColor = tone === 'selected' ? picked : accent
+    const bands =
+      chart.type === 'line' && tone === 'selected'
+        ? categories
+            .map((category, index) => (mark(chart.points[index]?.value ?? '') ? category : null))
+            .filter((category): category is string => Boolean(category))
+            .map((category) => [{ xAxis: category }, { xAxis: category }])
+        : []
+    const compareByValue = new Map(
+      (compareSeries?.points ?? []).map((point) => [point.value.toLowerCase(), point.metric]),
+    )
+    const showLegend = Boolean(legend && (seriesName || compareSeries))
+
     return {
-      color: [accent],
-      grid: { left: 8, right: 12, top: 18, bottom: 8, containLabel: true },
+      color: [toneColor],
+      grid: { left: 8, right: 12, top: 18, bottom: showLegend ? 36 : 8, containLabel: true },
+      legend: showLegend
+        ? {
+            bottom: 0,
+            icon: 'circle',
+            itemWidth: 8,
+            itemHeight: 8,
+            textStyle: { color: muted, fontSize: 12 },
+          }
+        : undefined,
       tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
@@ -101,27 +145,73 @@ export function AnalyticsMiniChart({
         axisLabel: {
           color: muted,
           fontSize: 10,
-          formatter: (value: number) => value.toLocaleString(locale),
+          formatter: (value: number) =>
+            tone === 'selected'
+              ? formatPointMetric(value, axisFormat, locale)
+              : value.toLocaleString(locale),
         },
         splitLine: { lineStyle: { color: line, opacity: 0.55 } },
       },
       series: [
         {
+          name: seriesName,
           type: chart.type === 'line' ? 'line' : 'bar',
           cursor: 'pointer',
           data: chart.points.map((point) => ({
             value: point.metric,
-            itemStyle: mark(point.value),
+            itemStyle: mark(point.value) ?? (tone === 'selected' ? { color: toneColor } : undefined),
           })),
           smooth: chart.type === 'line',
           symbolSize: chart.type === 'line' ? 8 : undefined,
           barMaxWidth: bare ? 42 : 28,
-          itemStyle: chart.type === 'bar' ? { borderRadius: [7, 7, 2, 2] } : undefined,
-          areaStyle: chart.type === 'line' ? { opacity: 0.14 } : undefined,
+          itemStyle:
+            chart.type === 'bar'
+              ? { borderRadius: [7, 7, 2, 2] }
+              : tone === 'selected'
+                ? { color: toneColor }
+                : undefined,
+          lineStyle: chart.type === 'line' ? { width: 2.5, color: toneColor } : undefined,
+          areaStyle:
+            chart.type === 'line'
+              ? { opacity: tone === 'selected' ? 0.16 : 0.14, color: tone === 'selected' ? toneColor : undefined }
+              : undefined,
+          markArea:
+            bands.length > 0
+              ? {
+                  silent: true,
+                  itemStyle: { color: picked, opacity: 0.16 },
+                  data: bands,
+                }
+              : undefined,
         },
+        ...(chart.type === 'line' && compareSeries && compareSeries.points.length > 0
+          ? [
+              {
+                name: compareSeries.name,
+                type: 'line' as const,
+                smooth: true,
+                symbol: 'none',
+                cursor: 'pointer',
+                data: chart.points.map((point) => compareByValue.get(point.value.toLowerCase()) ?? null),
+                lineStyle: { type: 'dashed' as const, width: 1.6, color: muted },
+                itemStyle: { color: muted },
+              },
+            ]
+          : []),
       ],
-    }
-  }, [bare, chart, locale, nullLabel, selectedValues])
+    } as EChartsOption
+  }, [
+    axisFormat,
+    bare,
+    chart,
+    compareSeries,
+    legend,
+    locale,
+    nullLabel,
+    selectedValues,
+    seriesName,
+    tone,
+  ])
 
   useEffect(() => {
     const host = hostRef.current

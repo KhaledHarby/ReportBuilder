@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
+import { IconDownload } from './Icons'
 import { useLocale } from '../i18n/LocaleProvider'
 
 export type AnalyticsExportKind = 'csv' | 'pdf' | 'pptx'
 
 type Props = {
   pending?: boolean
+  iconOnly?: boolean
   onExport: (kind: AnalyticsExportKind) => void
 }
 
-export function AnalyticsExportMenu({ pending, onExport }: Props) {
+export function AnalyticsExportMenu({ pending, iconOnly, onExport }: Props) {
   const { t } = useLocale()
   const rootRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
@@ -24,14 +26,16 @@ export function AnalyticsExportMenu({ pending, onExport }: Props) {
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
         setOpen(false)
       }
     }
     document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [open])
 
@@ -45,16 +49,24 @@ export function AnalyticsExportMenu({ pending, onExport }: Props) {
     <div className={`export-menu analytics-export-menu${open ? ' open' : ''}`} ref={rootRef}>
       <button
         type="button"
-        className="analytics-btn ghost"
+        className={iconOnly ? 'ax-icon-btn' : 'analytics-btn ghost'}
         disabled={pending}
         aria-expanded={open}
         aria-haspopup="menu"
+        aria-label={pending ? t('exporting') : t('analyticsExportMenu')}
+        title={pending ? t('exporting') : t('analyticsExportMenu')}
         onClick={() => setOpen((value) => !value)}
       >
-        {pending ? t('exporting') : t('analyticsExportMenu')}
-        <span className="export-caret" aria-hidden>
-          ▾
-        </span>
+        {iconOnly ? (
+          <IconDownload />
+        ) : (
+          <>
+            {pending ? t('exporting') : t('analyticsExportMenu')}
+            <span className="export-caret" aria-hidden>
+              ▾
+            </span>
+          </>
+        )}
       </button>
       {open && (
         <ul className="export-menu-list" role="menu">

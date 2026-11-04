@@ -4,21 +4,19 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, isSessionExpired } from '../api/client'
 import type {
   AnalyticsChartResult,
-  AnalyticsChartType,
   AnalyticsDashboardDetail,
   AnalyticsDimensionResult,
   AnalyticsDimensionValue,
-  AnalyticsMeasureResult,
   AnalyticsDataResult,
   AnalyticsSnapshotResult,
   AnalyticsSelectionState,
 } from '../api/types'
-import { AnalyticsDrilldown } from '../components/AnalyticsDrilldown'
+import { AnalyticsBoard, AnalyticsScopeButton, AnalyticsThemeButton } from '../components/AnalyticsBoard'
 import { AnalyticsExportMenu, type AnalyticsExportKind } from '../components/AnalyticsExportMenu'
 import { AnalyticsMapView } from '../components/AnalyticsMapView'
 import { AnalyticsMiniChart } from '../components/AnalyticsMiniChart'
 import { AnalyticsSmartSearch } from '../components/AnalyticsSmartSearch'
-import { IconBookmark, IconDrill, IconEdit, IconFilter, IconLock, IconUnlock } from '../components/Icons'
+import { IconDrill, IconEdit, IconFilter, IconLock, IconUnlock } from '../components/Icons'
 import { Spinner } from '../components/Spinner'
 import { useLocale } from '../i18n/LocaleProvider'
 import { localizedText } from '../i18n/localized'
@@ -51,6 +49,12 @@ import {
   type AnalyticsViewState,
 } from '../lib/analyticsFilters'
 import {
+  pickPeriodDimension,
+  pickScopeDimension,
+  pickTrendChart,
+  seriesPoints,
+} from '../lib/analyticsBoard'
+import {
   DRILL_CHART_ID,
   drillAtLeaf,
   drillInto,
@@ -76,27 +80,19 @@ export function AnalyticsDashboardPage() {
   )
   const [drillChrome, setDrillChrome] = useState<{
     dashboardId: string | undefined
-    breakdownOverride: string | null
     measureOverride: string | null
-    chartType: AnalyticsChartType
   }>(() => ({
     dashboardId: id,
-    breakdownOverride: null,
     measureOverride: null,
-    chartType: 'bar',
   }))
   const chrome =
     drillChrome.dashboardId === id
       ? drillChrome
       : {
           dashboardId: id,
-          breakdownOverride: null,
           measureOverride: null,
-          chartType: 'bar' as const,
         }
-  const breakdownOverride = chrome.breakdownOverride
   const measureOverride = chrome.measureOverride
-  const drillChartType = chrome.chartType
   const [skip, setSkip] = useState(0)
   const [menu, setMenu] = useState<string | null>(null)
   const [copyFlash, setCopyFlash] = useState(false)
@@ -129,11 +125,7 @@ export function AnalyticsDashboardPage() {
     () => dashboard.data?.config.measures.map((measure) => measure.id) ?? [],
     [dashboard.data],
   )
-  const suggestedBreakdown = nextBreakdownDimension(dimensionIds, view.drill ?? [])
-  const breakdownId =
-    breakdownOverride && dimensionIds.includes(breakdownOverride)
-      ? breakdownOverride
-      : suggestedBreakdown
+  const breakdownId = nextBreakdownDimension(dimensionIds, view.drill ?? [])
   const measureId =
     measureOverride && measureIds.includes(measureOverride)
       ? measureOverride
@@ -209,13 +201,22 @@ export function AnalyticsDashboardPage() {
   })
 
   const compareQuery = useQuery({
-    queryKey: ['analytics-query-compare', id, view.compare],
+    queryKey: [
+      'analytics-query-compare',
+      id,
+      view.compare,
+      serverDrill ? breakdownId : '',
+      serverDrill ? measureId : '',
+    ],
     queryFn: ({ signal }) =>
       api.queryAnalyticsDashboard(
         id!,
         {
           selections: view.compare,
           track: false,
+          ...(serverDrill
+            ? { drillDimensionId: breakdownId ?? undefined, drillMeasureId: measureId ?? undefined }
+            : {}),
         },
         signal,
       ),
@@ -231,18 +232,29 @@ export function AnalyticsDashboardPage() {
   }, [id])
 
   useEffect(() => {
-    if (menu !== 'bookmarks') {
-      return
-    }
-    const onPointer = (event: PointerEvent) => {
-      const node = event.target as HTMLElement | null
-      if (!node?.closest('.ax-menu')) {
-        setMenu(null)
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || menu) {
+        return
       }
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      if ((view.drill ?? []).length === 0) {
+        return
+      }
+      event.preventDefault()
+      patchView((current) => drillToLevel(current, (current.drill ?? []).length - 1))
     }
-    document.addEventListener('pointerdown', onPointer)
-    return () => document.removeEventListener('pointerdown', onPointer)
-  }, [menu])
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [menu, view.drill])
 
   useEffect(() => {
     const encoded = encodeViewState(view)
@@ -310,11 +322,7 @@ export function AnalyticsDashboardPage() {
     }
   }
 
-  function patchChrome(patch: {
-    breakdownOverride?: string | null
-    measureOverride?: string | null
-    chartType?: AnalyticsChartType
-  }) {
+  function patchChrome(patch: { measureOverride?: string | null }) {
     setDrillChrome({ ...chrome, ...patch, dashboardId: id })
   }
 
@@ -324,7 +332,6 @@ export function AnalyticsDashboardPage() {
   }
 
   function focusDrill(dimensionId: string, value: string) {
-    patchChrome({ breakdownOverride: null })
     patchView((current) => drillInto(current, dimensionId, value))
   }
 
@@ -393,9 +400,6 @@ export function AnalyticsDashboardPage() {
   // rather than an empty "0 rows" state before its request has started.
   const gridFirstLoad = !grid
   const mapFirstLoad = mapEnabled && !mapQuery.data
-  const configuredMeasures = item.config.measures.length
-  const configuredCharts = item.config.charts?.length ?? 0
-
   async function exportDashboard(kind: AnalyticsExportKind) {
     if (kind === 'csv') {
       exportCsv.mutate()
@@ -448,6 +452,138 @@ export function AnalyticsDashboardPage() {
           ? t('analyticsSourceLive')
           : null
 
+  const showValue = (value: string) => (value === ANALYTICS_NULL ? t('analyticsNullValue') : value)
+  const valueCounts: Record<string, number> = {}
+  for (const dimension of result?.dimensions ?? []) {
+    valueCounts[dimension.dimensionId] = dimension.values.filter((item) => item.state !== 'excluded').length
+  }
+  const periodId = pickPeriodDimension(dimensionIds, valueCounts, breakdownId)
+  const scopeId = pickScopeDimension(dimensionIds, breakdownId, periodId)
+  const periodDimension = item.config.dimensions.find((dimension) => dimension.id === periodId) ?? null
+  const scopeDimension = item.config.dimensions.find((dimension) => dimension.id === scopeId) ?? null
+  const breakdownDimension = item.config.dimensions.find((dimension) => dimension.id === breakdownId) ?? null
+  const breakdownName = breakdownDimension
+    ? breakdownDimension.label || breakdownDimension.field
+    : t('analyticsDrillBy')
+  const scopeSelection = scopeId ? (view.default[scopeId] ?? []) : []
+  const drillSteps = view.drill ?? []
+  const scopePill = scopeDimension
+    ? scopeSelection.length === 0
+      ? t('analyticsBoardAllOf', { label: scopeDimension.label || scopeDimension.field })
+      : scopeSelection.length === 1
+        ? showValue(scopeSelection[0])
+        : t('analyticsSelectedCount', { n: scopeSelection.length })
+    : drillSteps.length > 0
+      ? showValue(drillSteps[drillSteps.length - 1].value)
+      : t('analyticsBoardAllOf', { label: breakdownName })
+  const periodSelection = periodId ? (view.default[periodId] ?? []) : []
+  const captionParts: string[] = []
+  if (scopeDimension) {
+    captionParts.push(
+      scopeSelection.length === 1
+        ? showValue(scopeSelection[0])
+        : t('analyticsBoardAllOf', { label: scopeDimension.label || scopeDimension.field }),
+    )
+  }
+  if (periodSelection.length === 1) {
+    captionParts.push(showValue(periodSelection[0]))
+  }
+  for (const dimension of item.config.dimensions) {
+    if (dimension.id === scopeId || dimension.id === periodId || dimension.id === breakdownId) {
+      continue
+    }
+    const selected = view.default[dimension.id] ?? []
+    if (selected.length === 1) {
+      captionParts.push(showValue(selected[0]))
+    }
+  }
+  const totalCaption = captionParts.length > 0 ? captionParts.join(', ') : t('analyticsBreadcrumbAll')
+  const shareScope = scopeDimension ? scopeDimension.label || scopeDimension.field : breakdownName
+  const drillReady =
+    !serverDrill ||
+    (result?.charts ?? []).some(
+      (chart) =>
+        chart.chartId === DRILL_CHART_ID &&
+        chart.dimensionId === breakdownId &&
+        chart.measureId === measureId,
+    )
+  const series = breakdownId
+    ? resolveDrillSeries({
+        dimensionId: breakdownId,
+        measureId,
+        dimensions: result?.dimensions ?? [],
+        charts: result?.charts,
+        serverDrill,
+      })
+    : { points: [], usesCount: false }
+  const seriesLoading = Boolean(breakdownId) && !query.isError && (firstLoad || (serverDrill && !drillReady))
+  const compareActive =
+    Object.keys(view.compare).length > 0 ||
+    Object.values(view.dimStates).some((state) => state === 'compare')
+  const measureConfig = item.config.measures.find((measure) => measure.id === measureId) ?? null
+  const activeMeasure = result?.measures.find((measure) => measure.measureId === measureId) ?? null
+  const compareMeasure = compareActive
+    ? (compareResult?.measures.find((measure) => measure.measureId === measureId) ?? null)
+    : null
+  const measureLabel = activeMeasure?.label ?? measureConfig?.label ?? t('analyticsDrillCount')
+  const totalFormatted =
+    activeMeasure?.formattedValue ??
+    (series.usesCount ? series.points.reduce((sum, point) => sum + point.metric, 0).toLocaleString() : '—')
+  const savedTrend = pickTrendChart(result?.charts, breakdownId)
+  const trendChart =
+    savedTrend ??
+    (breakdownId && series.points.length > 0
+      ? {
+          chartId: `board-${breakdownId}`,
+          title: t('analyticsBoardTrendOf', { measure: measureLabel }),
+          type: 'line' as const,
+          dimensionId: breakdownId,
+          measureId: measureId ?? '',
+          state: 'default' as const,
+          points: series.points,
+        }
+      : null)
+  const trendCompare =
+    compareActive && trendChart
+      ? seriesPoints(compareResult?.charts, trendChart.dimensionId, trendChart.measureId)
+      : null
+  const extraCharts = charts.filter((chart) => {
+    if (savedTrend && chart.chartId === savedTrend.chartId) {
+      return false
+    }
+    if (chart.dimensionId === breakdownId && chart.measureId === measureId && chart.state !== 'compare') {
+      return false
+    }
+    if (
+      savedTrend &&
+      chart.state === 'compare' &&
+      chart.dimensionId === savedTrend.dimensionId &&
+      chart.measureId === savedTrend.measureId
+    ) {
+      return false
+    }
+    return true
+  })
+  const periodValues = (result?.dimensions.find((dimension) => dimension.dimensionId === periodId)?.values ?? [])
+    .filter((item) => item.state !== 'excluded')
+    .map((item) => ({ value: item.value, label: showValue(item.value) }))
+  const breakdownSelected =
+    result?.dimensions.find((dimension) => dimension.dimensionId === breakdownId)?.selectedValues ??
+    (breakdownId ? (view.default[breakdownId] ?? []) : [])
+
+  const choosePeriod = (value: string | null) => {
+    if (!periodId || view.locked.includes(periodId)) {
+      return
+    }
+    patchView((current) => ({
+      ...current,
+      default:
+        value == null
+          ? clearDimension(current.default, periodId)
+          : { ...current.default, [periodId]: [value] },
+    }))
+  }
+
   return (
     <section className={`analytics-stage ax-view${query.isFetching ? ' is-refreshing' : ''}`}>
       <header className="ax-top">
@@ -457,200 +593,160 @@ export function AnalyticsDashboardPage() {
           </Link>
           <div>
             <h1>{title}</h1>
-            {description && <p>{description}</p>}
+            {(description || sourceLabel || isDraft) && (
+              <p className="ax-meta">
+                {isDraft && <span className="badge draft">{t('analyticsDraftPreview')}</span>}
+                {sourceLabel && (
+                  <span
+                    data-testid="analytics-source-badge"
+                    title={
+                      result?.elapsedMs !== undefined
+                        ? t('analyticsSourceElapsed', { ms: result.elapsedMs.toLocaleString() })
+                        : undefined
+                    }
+                  >
+                    {sourceLabel}
+                  </span>
+                )}
+                {description && <span>{description}</span>}
+              </p>
+            )}
           </div>
         </div>
         <div className="ax-top-actions">
-          {sourceLabel && (
-            <span
-              className={`analytics-source-badge analytics-source-${result?.source === 'live' ? 'live' : 'cache'}`}
-              title={
-                result?.elapsedMs !== undefined
-                  ? t('analyticsSourceElapsed', { ms: result.elapsedMs.toLocaleString() })
-                  : undefined
-              }
-              data-testid="analytics-source-badge"
+          {item.config.dimensions.length > 0 && (
+            <AnalyticsScopeButton
+              label={scopePill}
+              open={menu === 'scope'}
+              onToggle={() => setMenu((current) => (current === 'scope' ? null : 'scope'))}
+              onClose={() => setMenu((current) => (current === 'scope' ? null : current))}
             >
-              <span className="analytics-source-dot" aria-hidden="true" />
-              {sourceLabel}
-            </span>
-          )}
-          {isDraft && <span className="badge draft">{t('analyticsDraftPreview')}</span>}
-          <div className="ax-menu">
-            <button
-              type="button"
-              className={`analytics-btn ghost${menu === 'bookmarks' ? ' is-on' : ''}`}
-              aria-expanded={menu === 'bookmarks'}
-              onClick={() => setMenu((current) => (current === 'bookmarks' ? null : 'bookmarks'))}
-            >
-              <IconBookmark />
-              {t('analyticsBookmarks')}
-              {bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
-            </button>
-            {menu === 'bookmarks' && (
-              <div className="ax-menu-panel">
-                <BookmarkBar
-                  bookmarks={bookmarks}
-                  name={bookmarkName}
-                  onName={setBookmarkName}
-                  saveLabel={t('analyticsSaveBookmark')}
-                  emptyLabel={t('analyticsNoBookmarks')}
-                  heading={t('analyticsBookmarks')}
-                  nameLabel={t('analyticsBookmarkName')}
-                  onSave={() => {
-                    if (!id || !bookmarkName.trim()) {
-                      return
+              <AnalyticsSmartSearch
+                dimensions={result?.dimensions ?? []}
+                nullLabel={t('analyticsNullValue')}
+                onSelect={toggleValue}
+                onSearch={id ? searchValues : undefined}
+              />
+              {item.config.dimensions.map((dimension) => {
+                const state = resolveDimState(view.dimStates, dimension.id)
+                const source = state === 'compare' ? compareResult : result
+                const selected = (state === 'compare' ? view.compare : view.default)[dimension.id] ?? []
+                const data = source?.dimensions.find((entry) => entry.dimensionId === dimension.id) ?? {
+                  dimensionId: dimension.id,
+                  label: dimension.label || dimension.field,
+                  selectedValues: selected,
+                  values: [],
+                }
+                const locked = view.locked.includes(dimension.id)
+                return (
+                  <DimensionWidget
+                    key={dimension.id}
+                    dimension={data}
+                    search=""
+                    state={state}
+                    locked={locked}
+                    onToggle={(value) => toggleValue(dimension.id, value)}
+                    onDrill={(value) => {
+                      setMenu(null)
+                      focusDrill(dimension.id, value)
+                    }}
+                    onSelectMatching={(values) => {
+                      if (locked) return
+                      patchView((current) => ({
+                        ...current,
+                        [state]: selectValues(current[state], dimension.id, values),
+                      }))
+                    }}
+                    onClear={() => {
+                      if (locked) return
+                      patchView((current) => ({
+                        ...current,
+                        [state]: clearDimension(current[state], dimension.id),
+                      }))
+                    }}
+                    onLock={() =>
+                      setView((current) => ({
+                        ...current,
+                        locked: toggleLocked(current.locked, dimension.id),
+                      }))
                     }
-                    setBookmarks(createBookmark(id, bookmarkName, view))
-                    setBookmarkName('')
-                  }}
-                  onApply={(bookmark) => {
-                    setSkip(0)
-                    patchChrome({ breakdownOverride: null })
-                    setView(reconcileDrill(normalizeViewState(bookmark.view)))
-                    setMenu(null)
-                  }}
-                  onDelete={(bookmarkId) => {
-                    if (!id) return
-                    setBookmarks(deleteBookmark(id, bookmarkId))
-                  }}
-                />
-              </div>
-            )}
-          </div>
-          <button type="button" className="analytics-btn ghost" onClick={() => void copyLink()}>
-            {copyFlash ? t('analyticsLinkCopied') : t('analyticsCopyLink')}
-          </button>
+                    onState={(next) => patchView((current) => moveDimensionState(current, dimension.id, next))}
+                    emptyLabel={t('analyticsNoDimensionValues')}
+                    nullLabel={t('analyticsNullValue')}
+                    selectMatchingLabel={t('analyticsSelectMatching')}
+                    clearLabel={t('analyticsClearDim')}
+                    lockLabel={locked ? t('analyticsUnlockDim') : t('analyticsLockDim')}
+                    searchLabel={t('analyticsFilterDim')}
+                    drillLabel={t('analyticsDrillInto', { label: dimension.label || dimension.field })}
+                    defaultStateLabel="A"
+                    compareStateLabel="B"
+                  />
+                )
+              })}
+              <button
+                type="button"
+                className="analytics-btn ghost"
+                disabled={crumbs.length === 0}
+                onClick={clearAllFilters}
+              >
+                {t('analyticsClearSelections')}
+              </button>
+            </AnalyticsScopeButton>
+          )}
+          <AnalyticsThemeButton />
           <AnalyticsExportMenu
+            iconOnly
             pending={exportCsv.isPending || screenExporting}
             onExport={(kind) => {
               void exportDashboard(kind)
             }}
           />
-          {item.canEdit && (
-            <Link className="analytics-btn ghost" to={`/analytics/${item.id}`}>
-              <IconEdit />
-              {t('edit')}
-            </Link>
-          )}
+          <MoreActions
+            label={t('analyticsBoardMore')}
+            open={menu === 'more'}
+            onToggle={() => setMenu((current) => (current === 'more' ? null : 'more'))}
+            onClose={() => setMenu((current) => (current === 'more' ? null : current))}
+          >
+            <BookmarkBar
+              bookmarks={bookmarks}
+              name={bookmarkName}
+              onName={setBookmarkName}
+              saveLabel={t('analyticsSaveBookmark')}
+              emptyLabel={t('analyticsNoBookmarks')}
+              heading={t('analyticsBookmarks')}
+              nameLabel={t('analyticsBookmarkName')}
+              onSave={() => {
+                if (!id || !bookmarkName.trim()) {
+                  return
+                }
+                setBookmarks(createBookmark(id, bookmarkName, view))
+                setBookmarkName('')
+              }}
+              onApply={(bookmark) => {
+                setSkip(0)
+                patchChrome({ measureOverride: null })
+                setView(reconcileDrill(normalizeViewState(bookmark.view)))
+                setMenu(null)
+              }}
+              onDelete={(bookmarkId) => {
+                if (!id) return
+                setBookmarks(deleteBookmark(id, bookmarkId))
+              }}
+            />
+            <button type="button" className="analytics-btn ghost" onClick={() => void copyLink()}>
+              {copyFlash ? t('analyticsLinkCopied') : t('analyticsCopyLink')}
+            </button>
+            {item.canEdit && (
+              <Link className="analytics-btn ghost" to={`/analytics/${item.id}`}>
+                <IconEdit />
+                {t('edit')}
+              </Link>
+            )}
+          </MoreActions>
         </div>
       </header>
 
       {isDraft && <div className="banner analytics-draft-banner">{t('analyticsDraftBanner')}</div>}
-
-      <div className="ax-filters">
-        <AnalyticsSmartSearch
-          dimensions={result?.dimensions ?? []}
-          nullLabel={t('analyticsNullValue')}
-          onSelect={toggleValue}
-          onSearch={id ? searchValues : undefined}
-        />
-        <div className="ax-slicers">
-          {item.config.dimensions.map((dimension) => {
-            const state = resolveDimState(view.dimStates, dimension.id)
-            const source = state === 'compare' ? compareResult : result
-            const selected = (state === 'compare' ? view.compare : view.default)[dimension.id] ?? []
-            const data = source?.dimensions.find((item) => item.dimensionId === dimension.id) ?? {
-              dimensionId: dimension.id,
-              label: dimension.label,
-              selectedValues: selected,
-              values: [],
-            }
-            const locked = view.locked.includes(dimension.id)
-            const summary =
-              selected.length === 0
-                ? t('analyticsAny')
-                : selected.length === 1
-                  ? selected[0] === ANALYTICS_NULL
-                    ? t('analyticsNullValue')
-                    : selected[0]
-                  : t('analyticsSelectedCount', { n: selected.length })
-            return (
-              <Slicer
-                key={dimension.id}
-                label={dimension.label || dimension.field}
-                summary={summary}
-                active={selected.length > 0}
-                locked={locked}
-                open={menu === dimension.id}
-                onOpen={() => setMenu(dimension.id)}
-                onClose={() => setMenu((current) => (current === dimension.id ? null : current))}
-              >
-                <DimensionWidget
-                  dimension={data}
-                  search=""
-                  state={state}
-                  locked={locked}
-                  onToggle={(value) => toggleValue(dimension.id, value)}
-                  onDrill={(value) => focusDrill(dimension.id, value)}
-                  onSelectMatching={(values) => {
-                    if (locked) return
-                    patchView((current) => ({
-                      ...current,
-                      [state]: selectValues(current[state], dimension.id, values),
-                    }))
-                  }}
-                  onClear={() => {
-                    if (locked) return
-                    patchView((current) => ({
-                      ...current,
-                      [state]: clearDimension(current[state], dimension.id),
-                    }))
-                  }}
-                  onLock={() =>
-                    setView((current) => ({
-                      ...current,
-                      locked: toggleLocked(current.locked, dimension.id),
-                    }))
-                  }
-                  onState={(next) => patchView((current) => moveDimensionState(current, dimension.id, next))}
-                  emptyLabel={t('analyticsNoDimensionValues')}
-                  nullLabel={t('analyticsNullValue')}
-                  selectMatchingLabel={t('analyticsSelectMatching')}
-                  clearLabel={t('analyticsClearDim')}
-                  lockLabel={locked ? t('analyticsUnlockDim') : t('analyticsLockDim')}
-                  searchLabel={t('analyticsFilterDim')}
-                  drillLabel={t('analyticsDrillInto', { label: dimension.label || dimension.field })}
-                  defaultStateLabel="A"
-                  compareStateLabel="B"
-                />
-              </Slicer>
-            )
-          })}
-        </div>
-        <button
-          type="button"
-          className="analytics-btn ghost"
-          disabled={crumbs.length === 0}
-          onClick={clearAllFilters}
-        >
-          {t('analyticsClearSelections')}
-        </button>
-      </div>
-
-      {crumbs.length > 0 && (
-      <FilterBreadcrumbs
-        crumbs={crumbs}
-        emptyLabel={t('analyticsNoSelections')}
-        locked={view.locked}
-        onRemove={(dimensionId, value) => {
-          if (view.locked.includes(dimensionId)) {
-            return
-          }
-          toggleValue(dimensionId, value)
-        }}
-        onClearGroup={(dimensionId, state) => {
-          if (view.locked.includes(dimensionId)) {
-            return
-          }
-          patchView((current) => ({
-            ...current,
-            [state]: clearDimension(current[state], dimensionId),
-          }))
-        }}
-        onClearAll={clearAllFilters}
-      />
-      )}
 
       {(query.isError || dataQuery.isError || mapQuery.isError || compareQuery.isError || exportError) && (
         <div className="banner error">
@@ -663,180 +759,160 @@ export function AnalyticsDashboardPage() {
       )}
 
       <div className="analytics-canvas ax-board" aria-busy={query.isFetching}>
-          {configuredMeasures === 0 && (result?.measures.length ?? 0) === 0 ? (
-            <div className="analytics-empty-block">{t('analyticsNoMeasures')}</div>
-          ) : (
-            <div className="analytics-kpi-strip">
-              {firstLoad
-                ? Array.from({ length: configuredMeasures || 3 }, (_, index) => (
-                    <KpiCard key={`skeleton-${index}`} skeleton />
-                  ))
-                : result!.measures.map((measure, index) => (
-                    <KpiCard
-                      key={measure.measureId}
-                      measure={measure}
-                      style={{ animationDelay: `${index * 60}ms` }}
-                    />
-                  ))}
-            </div>
-          )}
+        <AnalyticsBoard
+          measures={item.config.measures.map((measure) => ({ id: measure.id, label: measure.label }))}
+          measureId={measureId}
+          measureLabel={measureLabel}
+          measureFormat={measureConfig?.format ?? null}
+          onMeasure={(next) => patchChrome({ measureOverride: next })}
+          period={
+            periodDimension
+              ? {
+                  label: periodDimension.label || periodDimension.field,
+                  values: periodValues,
+                  selected: periodSelection.length === 1 ? periodSelection[0] : null,
+                  allActive: periodSelection.length === 0,
+                  locked: view.locked.includes(periodDimension.id),
+                }
+              : null
+          }
+          onPeriod={choosePeriod}
+          points={series.points}
+          comparePoints={compareActive ? seriesPoints(compareResult?.charts, breakdownId, measureId) : null}
+          totalFormatted={totalFormatted}
+          totalNumeric={activeMeasure?.numericValue ?? null}
+          compareNumeric={compareMeasure?.numericValue ?? null}
+          selectedValues={breakdownSelected}
+          totalCaption={totalCaption}
+          shareScope={shareScope}
+          breakdownName={breakdownName}
+          breakdownTitle={t('analyticsBoardBy', { measure: measureLabel, dimension: breakdownName })}
+          breakdownLocked={Boolean(breakdownId && view.locked.includes(breakdownId))}
+          atLeaf={drillAtLeaf(dimensionIds, view.drill ?? [])}
+          figuresLoading={firstLoad}
+          seriesLoading={seriesLoading}
+          drill={view.drill ?? []}
+          pathLabel={(step) => `${labels[step.dimensionId] ?? step.dimensionId}: ${showValue(step.value)}`}
+          onDrill={(value) => {
+            if (breakdownId) {
+              focusDrill(breakdownId, value)
+            }
+          }}
+          onDrillTo={(depth) => patchView((current) => drillToLevel(current, depth))}
+          trend={
+            trendChart
+              ? {
+                  title: trendChart.title,
+                  chart: trendChart,
+                  comparePoints: trendCompare,
+                  selectedValues: view.default[trendChart.dimensionId] ?? [],
+                  onSelect: (value) => {
+                    if (periodId && trendChart.dimensionId === periodId) {
+                      const current = view.default[periodId] ?? []
+                      const same =
+                        current.length === 1 && current[0].toLowerCase() === value.toLowerCase()
+                      choosePeriod(same ? null : value)
+                      return
+                    }
+                    if (trendChart.dimensionId === breakdownId) {
+                      focusDrill(trendChart.dimensionId, value)
+                      return
+                    }
+                    toggleValue(trendChart.dimensionId, value)
+                  },
+                }
+              : null
+          }
+        />
 
-          {hasCompare && (compareResult?.measures.length ?? 0) > 0 && (
-            <div>
-              <h2 className="analytics-section-title">{t('analyticsCompareKpis')}</h2>
-              <div className="analytics-kpi-strip">
-                {compareResult!.measures.map((measure) => (
-                  <KpiCard key={`c-${measure.measureId}`} measure={measure} compare />
-                ))}
-              </div>
-            </div>
-          )}
+        {!firstLoad && extraCharts.length > 0 && (
+          <div className="analytics-chart-grid">
+            {extraCharts.map((chart) =>
+              chart.points.length === 0 ? (
+                <article key={chart.chartId} className="analytics-chart-card">
+                  <header>
+                    <h3>{chart.title}</h3>
+                  </header>
+                  <div className="analytics-empty-block">{t('analyticsChartEmpty')}</div>
+                </article>
+              ) : (
+                <AnalyticsMiniChart
+                  key={chart.chartId}
+                  chart={chart}
+                  nullLabel={t('analyticsNullValue')}
+                  onSelect={(value) => toggleValue(chart.dimensionId, value)}
+                />
+              ),
+            )}
+          </div>
+        )}
 
-          {item.config.dimensions.length > 0 && (
-            <DrillCanvas
-              dimensions={item.config.dimensions.map((dimension) => ({
-                id: dimension.id,
-                label: dimension.label || dimension.field,
-              }))}
-              measures={item.config.measures.map((measure) => ({
-                id: measure.id,
-                label: measure.label,
-              }))}
-              drill={view.drill ?? []}
-              breakdownId={breakdownId}
-              measureId={measureId}
-              chartType={drillChartType}
-              result={result}
-              firstLoad={firstLoad}
-              failed={query.isError}
-              serverDrill={serverDrill}
-              locked={Boolean(breakdownId && view.locked.includes(breakdownId))}
-              atLeaf={drillAtLeaf(dimensionIds, view.drill ?? [])}
-              onBreakdown={(dimensionId) => patchChrome({ breakdownOverride: dimensionId })}
-              onMeasure={(nextMeasure) => patchChrome({ measureOverride: nextMeasure })}
-              onChartType={(type) => patchChrome({ chartType: type })}
-              onDrill={(value) => {
-                if (breakdownId) {
-                  focusDrill(breakdownId, value)
+        {item.config.map?.enabled && (
+          <div ref={mapPane.ref}>
+            <AnalyticsMapView
+              points={mapPoints}
+              loading={mapFirstLoad}
+              emptyLabel={t('analyticsMapEmpty')}
+              title={t('analyticsMapTitle')}
+              onSelect={(label) => {
+                const match = result?.dimensions.find((dimension) =>
+                  dimension.values.some((value) => value.value.toLowerCase() === label.toLowerCase()),
+                )
+                const value = match?.values.find(
+                  (entry) => entry.value.toLowerCase() === label.toLowerCase(),
+                )?.value
+                if (match && value) {
+                  toggleValue(match.dimensionId, value)
                 }
               }}
-              onDrillTo={(depth) => {
-                patchChrome({ breakdownOverride: null })
-                patchView((current) => drillToLevel(current, depth))
-              }}
-            />
-          )}
-
-          {firstLoad && configuredCharts > 0 && (
-            <div className="analytics-chart-grid">
-              {Array.from({ length: configuredCharts }, (_, index) => (
-                <article key={`chart-skeleton-${index}`} className="analytics-chart-card" aria-hidden="true">
-                  <span className="analytics-skeleton analytics-skeleton-sm" />
-                  <span className="analytics-skeleton analytics-skeleton-chart" />
-                </article>
-              ))}
-            </div>
-          )}
-
-          {!firstLoad &&
-            charts.some(
-              (chart) =>
-                chart.dimensionId !== breakdownId ||
-                chart.measureId !== measureId ||
-                chart.state === 'compare',
-            ) && (
-            <div className="analytics-chart-grid">
-              {charts.map((chart) =>
-                (chart.dimensionId === breakdownId &&
-                  chart.measureId === measureId &&
-                  chart.state !== 'compare') ? null : chart.points.length === 0 ? (
-                  <article key={chart.chartId} className="analytics-chart-card">
-                    <header>
-                      <h3>{chart.title}</h3>
-                    </header>
-                    <div className="analytics-empty-block">{t('analyticsChartEmpty')}</div>
-                  </article>
-                ) : (
-                  <AnalyticsMiniChart
-                    key={chart.chartId}
-                    chart={chart}
-                    nullLabel={t('analyticsNullValue')}
-                    onSelect={(value) => toggleValue(chart.dimensionId, value)}
-                  />
-                ),
-              )}
-            </div>
-          )}
-
-          {item.config.map?.enabled && (
-            <div ref={mapPane.ref}>
-              <AnalyticsMapView
-                points={mapPoints}
-                loading={mapFirstLoad}
-                emptyLabel={t('analyticsMapEmpty')}
-                title={t('analyticsMapTitle')}
-                onSelect={(label) => {
-                  const match = result?.dimensions.find((dimension) =>
-                    dimension.values.some(
-                      (value) => value.value.toLowerCase() === label.toLowerCase(),
-                    ),
-                  )
-                  const value = match?.values.find(
-                    (item) => item.value.toLowerCase() === label.toLowerCase(),
-                  )?.value
-                  if (match && value) {
-                    toggleValue(match.dimensionId, value)
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          <div ref={gridPane.ref}>
-            <DetailDataGrid
-              result={grid}
-              loading={dataQuery.isFetching}
-              firstLoad={gridFirstLoad}
-              skip={skip}
-              pageSize={PAGE_SIZE}
-              onPrev={() => setSkip((value) => Math.max(0, value - PAGE_SIZE))}
-              onNext={() => setSkip((value) => value + PAGE_SIZE)}
-              onUseRow={(row) => {
-                patchView((current) => ({
-                  ...current,
-                  default: applyRowToSelections(
-                    current.default,
-                    row,
-                    (grid?.columns ?? []).map((column) => ({
-                      id: column.id,
-                      field: item.config.detailColumns.find((detail) => detail.id === column.id)?.field
-                        ?? item.config.dimensions.find((dimension) => dimension.id === column.id)?.field,
-                      label: column.label,
-                    })),
-                    item.config.dimensions,
-                  ),
-                }))
-              }}
-              title={t('analyticsDetailGrid')}
-              emptyLabel={t('analyticsNoRows')}
-              nullLabel={t('analyticsNullValue')}
-              prevLabel={t('analyticsPrev')}
-              nextLabel={t('analyticsNextPage')}
-              rowFilterLabel={t('analyticsRowFilter')}
-              scope={(view.drill ?? [])
-                .map((step) => {
-                  const label = labels[step.dimensionId] ?? step.dimensionId
-                  const value = step.value === ANALYTICS_NULL ? t('analyticsNullValue') : step.value
-                  return `${label}: ${value}`
-                })
-                .join(' · ')}
             />
           </div>
+        )}
+
+        <div ref={gridPane.ref}>
+          <DetailDataGrid
+            result={grid}
+            loading={dataQuery.isFetching}
+            firstLoad={gridFirstLoad}
+            skip={skip}
+            pageSize={PAGE_SIZE}
+            onPrev={() => setSkip((value) => Math.max(0, value - PAGE_SIZE))}
+            onNext={() => setSkip((value) => value + PAGE_SIZE)}
+            onUseRow={(row) => {
+              patchView((current) => ({
+                ...current,
+                default: applyRowToSelections(
+                  current.default,
+                  row,
+                  (grid?.columns ?? []).map((column) => ({
+                    id: column.id,
+                    field:
+                      item.config.detailColumns.find((detail) => detail.id === column.id)?.field ??
+                      item.config.dimensions.find((dimension) => dimension.id === column.id)?.field,
+                    label: column.label,
+                  })),
+                  item.config.dimensions,
+                ),
+              }))
+            }}
+            title={t('analyticsDetailGrid')}
+            emptyLabel={t('analyticsNoRows')}
+            nullLabel={t('analyticsNullValue')}
+            prevLabel={t('analyticsPrev')}
+            nextLabel={t('analyticsNextPage')}
+            rowFilterLabel={t('analyticsRowFilter')}
+            scope={(view.drill ?? [])
+              .map((step) => {
+                const label = labels[step.dimensionId] ?? step.dimensionId
+                return `${label}: ${showValue(step.value)}`
+              })
+              .join(' · ')}
+          />
+        </div>
       </div>
     </section>
   )
 }
-
 function mergeCharts(
   dashboard: AnalyticsDashboardDetail,
   result: AnalyticsSnapshotResult | undefined,
@@ -873,22 +949,17 @@ function mergeCharts(
   ]
 }
 
-function Slicer({
-  label,
-  summary,
-  active,
-  locked,
+
+function MoreActions({
   open,
-  onOpen,
+  label,
+  onToggle,
   onClose,
   children,
 }: {
-  label: string
-  summary: string
-  active: boolean
-  locked: boolean
   open: boolean
-  onOpen: () => void
+  label: string
+  onToggle: () => void
   onClose: () => void
   children: ReactNode
 }) {
@@ -904,29 +975,25 @@ function Slicer({
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
         onClose()
       }
     }
     document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [open, onClose])
 
   return (
-    <div className={`ax-slicer${open ? ' is-open' : ''}${active ? ' is-active' : ''}${locked ? ' is-locked' : ''}`} ref={ref}>
-      <button
-        type="button"
-        className="ax-slicer-btn"
-        aria-expanded={open}
-        onClick={() => (open ? onClose() : onOpen())}
-      >
-        <small>{label}</small>
-        <strong>{summary}</strong>
+    <div className={`ax-pop${open ? ' is-open' : ''}`} ref={ref}>
+      <button type="button" className="ax-outline-btn" aria-expanded={open} aria-haspopup="dialog" onClick={onToggle}>
+        {label}
       </button>
-      {open && <div className="ax-slicer-panel">{children}</div>}
+      {open && <div className="ax-pop-panel ax-more-panel">{children}</div>}
     </div>
   )
 }
@@ -987,139 +1054,6 @@ function BookmarkBar({
         )}
       </div>
     </div>
-  )
-}
-
-const BREADCRUMB_VISIBLE = 3
-
-function groupBreadcrumbs(
-  crumbs: { dimensionId: string; label: string; value: string; display: string; state: AnalyticsSelectionState }[],
-) {
-  const groups: {
-    key: string
-    dimensionId: string
-    label: string
-    state: AnalyticsSelectionState
-    values: { value: string; display: string }[]
-  }[] = []
-  const index = new Map<string, (typeof groups)[number]>()
-  for (const crumb of crumbs) {
-    const key = `${crumb.state}:${crumb.dimensionId}`
-    let group = index.get(key)
-    if (!group) {
-      group = {
-        key,
-        dimensionId: crumb.dimensionId,
-        label: crumb.label,
-        state: crumb.state,
-        values: [],
-      }
-      index.set(key, group)
-      groups.push(group)
-    }
-    group.values.push({ value: crumb.value, display: crumb.display })
-  }
-  return groups
-}
-
-function FilterBreadcrumbs({
-  crumbs,
-  emptyLabel,
-  locked,
-  onRemove,
-  onClearGroup,
-  onClearAll,
-}: {
-  crumbs: { dimensionId: string; label: string; value: string; display: string; state: AnalyticsSelectionState }[]
-  emptyLabel: string
-  locked: string[]
-  onRemove: (dimensionId: string, value: string) => void
-  onClearGroup: (dimensionId: string, state: AnalyticsSelectionState) => void
-  onClearAll: () => void
-}) {
-  const { t } = useLocale()
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const groups = useMemo(() => groupBreadcrumbs(crumbs), [crumbs])
-  const canClear = crumbs.some((crumb) => !locked.includes(crumb.dimensionId))
-
-  return (
-    <nav className={`analytics-breadcrumbs${crumbs.length === 0 ? ' is-empty' : ''}`} aria-label={t('analyticsBreadcrumbTrail')}>
-      <button
-        type="button"
-        className={`analytics-crumb-root${crumbs.length === 0 ? ' is-current' : ''}`}
-        disabled={!canClear}
-        onClick={onClearAll}
-        title={t('analyticsClearSelections')}
-      >
-        {t('analyticsBreadcrumbAll')}
-      </button>
-      {groups.map((group) => {
-        const isLocked = locked.includes(group.dimensionId)
-        const open = expanded[group.key]
-        const hidden = open ? 0 : Math.max(0, group.values.length - BREADCRUMB_VISIBLE)
-        const shown = hidden > 0 ? group.values.slice(0, BREADCRUMB_VISIBLE) : group.values
-        return (
-          <div key={group.key} className="analytics-crumb-step">
-            <span className="analytics-crumb-sep" aria-hidden="true">
-              ›
-            </span>
-            <div
-              className={`analytics-crumb-group${group.state === 'compare' ? ' is-compare' : ''}${isLocked ? ' is-locked' : ''}`}
-              role="list"
-            >
-              <span className="analytics-crumb-field">
-                {group.state === 'compare' && (
-                  <i className="analytics-crumb-badge" title={t('analyticsBreadcrumbCompare')}>
-                    B
-                  </i>
-                )}
-                {group.label}
-                {isLocked && (
-                  <span className="analytics-crumb-lock-wrap" title={t('analyticsBreadcrumbLocked')}>
-                    <IconLock className="analytics-crumb-lock" />
-                  </span>
-                )}
-              </span>
-              {shown.map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  className="analytics-crumb-chip"
-                  role="listitem"
-                  disabled={isLocked}
-                  onClick={() => onRemove(group.dimensionId, item.value)}
-                  title={`${group.label}: ${item.display}`}
-                >
-                  <span>{item.display}</span>
-                  {!isLocked && <em aria-hidden="true">×</em>}
-                </button>
-              ))}
-              {hidden > 0 && (
-                <button
-                  type="button"
-                  className="analytics-crumb-more"
-                  onClick={() => setExpanded((current) => ({ ...current, [group.key]: true }))}
-                >
-                  {t('analyticsBreadcrumbMore', { n: hidden })}
-                </button>
-              )}
-              {!isLocked && group.values.length > 1 && (
-                <button
-                  type="button"
-                  className="analytics-crumb-clear-group"
-                  title={t('analyticsBreadcrumbClearGroup', { label: group.label })}
-                  aria-label={t('analyticsBreadcrumbClearGroup', { label: group.label })}
-                  onClick={() => onClearGroup(group.dimensionId, group.state)}
-                >
-                  ×
-                </button>
-              )}
-            </div>
-          </div>
-        )
-      })}
-      {crumbs.length === 0 && <span className="analytics-crumb-empty">{emptyLabel}</span>}
-    </nav>
   )
 }
 
@@ -1309,115 +1243,6 @@ function DimensionRow({
         <IconDrill />
       </button>
     </li>
-  )
-}
-
-function DrillCanvas({
-  dimensions,
-  measures,
-  drill,
-  breakdownId,
-  measureId,
-  chartType,
-  result,
-  firstLoad,
-  failed,
-  serverDrill,
-  locked,
-  atLeaf,
-  onBreakdown,
-  onMeasure,
-  onChartType,
-  onDrill,
-  onDrillTo,
-}: {
-  dimensions: { id: string; label: string }[]
-  measures: { id: string; label: string }[]
-  drill: AnalyticsViewState['drill']
-  breakdownId: string | null
-  measureId: string | null
-  chartType: AnalyticsChartType
-  result: AnalyticsSnapshotResult | undefined
-  firstLoad: boolean
-  failed: boolean
-  serverDrill: boolean
-  locked: boolean
-  atLeaf: boolean
-  onBreakdown: (dimensionId: string) => void
-  onMeasure: (measureId: string) => void
-  onChartType: (type: AnalyticsChartType) => void
-  onDrill: (value: string) => void
-  onDrillTo: (depth: number) => void
-}) {
-  const drillReady =
-    !serverDrill ||
-    (result?.charts ?? []).some(
-      (chart) =>
-        chart.chartId === DRILL_CHART_ID &&
-        chart.dimensionId === breakdownId &&
-        chart.measureId === measureId,
-    )
-  const series = breakdownId
-    ? resolveDrillSeries({
-        dimensionId: breakdownId,
-        measureId,
-        dimensions: result?.dimensions ?? [],
-        charts: result?.charts,
-        serverDrill,
-      })
-    : { points: [], usesCount: true }
-  const selectedValues =
-    result?.dimensions.find((dimension) => dimension.dimensionId === breakdownId)?.selectedValues ?? []
-
-  return (
-    <AnalyticsDrilldown
-      dimensions={dimensions}
-      measures={measures}
-      drill={drill}
-      breakdownId={breakdownId}
-      measureId={measureId}
-      chartType={chartType}
-      points={series.points}
-      usesCount={series.usesCount}
-      loading={Boolean(breakdownId) && !failed && (firstLoad || (serverDrill && !drillReady))}
-      locked={locked}
-      atLeaf={atLeaf}
-      selectedValues={selectedValues}
-      onBreakdown={onBreakdown}
-      onMeasure={onMeasure}
-      onChartType={onChartType}
-      onDrill={onDrill}
-      onDrillTo={onDrillTo}
-    />
-  )
-}
-
-function KpiCard({
-  measure,
-  style,
-  compare,
-  skeleton,
-}: {
-  measure?: AnalyticsMeasureResult
-  style?: CSSProperties
-  compare?: boolean
-  skeleton?: boolean
-}) {
-  if (skeleton || !measure) {
-    return (
-      <article className="analytics-kpi is-skeleton" aria-hidden="true">
-        <span className="analytics-skeleton analytics-skeleton-sm" />
-        <span className="analytics-skeleton analytics-skeleton-lg" />
-      </article>
-    )
-  }
-
-  return (
-    <article className={`analytics-kpi${compare ? ' is-compare' : ''}`} style={style}>
-      <div className="analytics-kpi-label">{measure.label}</div>
-      <div className="analytics-kpi-value">{measure.formattedValue ?? '—'}</div>
-      <div className="analytics-kpi-sheen" aria-hidden="true" />
-    </article>
   )
 }
 
