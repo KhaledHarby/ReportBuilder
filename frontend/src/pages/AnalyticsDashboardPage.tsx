@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, isSessionExpired } from '../api/client'
 import type {
@@ -76,13 +76,11 @@ export function AnalyticsDashboardPage() {
   )
   const [drillChrome, setDrillChrome] = useState<{
     dashboardId: string | undefined
-    railOpen: boolean
     breakdownOverride: string | null
     measureOverride: string | null
     chartType: AnalyticsChartType
   }>(() => ({
     dashboardId: id,
-    railOpen: true,
     breakdownOverride: null,
     measureOverride: null,
     chartType: 'bar',
@@ -92,22 +90,19 @@ export function AnalyticsDashboardPage() {
       ? drillChrome
       : {
           dashboardId: id,
-          railOpen: true,
           breakdownOverride: null,
           measureOverride: null,
           chartType: 'bar' as const,
         }
-  const railOpen = chrome.railOpen
   const breakdownOverride = chrome.breakdownOverride
   const measureOverride = chrome.measureOverride
   const drillChartType = chrome.chartType
   const [skip, setSkip] = useState(0)
-  const [dimSearch, setDimSearch] = useState('')
+  const [menu, setMenu] = useState<string | null>(null)
   const [copyFlash, setCopyFlash] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [screenExporting, setScreenExporting] = useState(false)
   const [bookmarkName, setBookmarkName] = useState('')
-  const [bookmarksOpen, setBookmarksOpen] = useState(false)
   const [bookmarks, setBookmarks] = useState<AnalyticsBookmark[]>(() =>
     id ? loadBookmarks(id) : [],
   )
@@ -236,6 +231,20 @@ export function AnalyticsDashboardPage() {
   }, [id])
 
   useEffect(() => {
+    if (menu !== 'bookmarks') {
+      return
+    }
+    const onPointer = (event: PointerEvent) => {
+      const node = event.target as HTMLElement | null
+      if (!node?.closest('.ax-menu')) {
+        setMenu(null)
+      }
+    }
+    document.addEventListener('pointerdown', onPointer)
+    return () => document.removeEventListener('pointerdown', onPointer)
+  }, [menu])
+
+  useEffect(() => {
     const encoded = encodeViewState(view)
     const current = searchParams.get('sel') ?? ''
     if (encoded === current) {
@@ -262,15 +271,12 @@ export function AnalyticsDashboardPage() {
     ...selectionEntries(view.default, labels, 'default'),
     ...selectionEntries(view.compare, labels, 'compare'),
   ]
-  const associatedCount = useMemo(
-    () =>
-      (query.data?.dimensions ?? []).reduce(
-        (sum, dimension) =>
-          sum + dimension.values.filter((item) => item.state !== 'excluded').length,
-        0,
-      ),
-    [query.data],
-  )
+  const clearAllFilters = () =>
+    patchView((current) => ({
+      ...current,
+      default: clearSelections(current.locked, current.default),
+      compare: clearSelections(current.locked, current.compare),
+    }))
 
   const exportCsv = useMutation({
     mutationFn: () =>
@@ -305,7 +311,6 @@ export function AnalyticsDashboardPage() {
   }
 
   function patchChrome(patch: {
-    railOpen?: boolean
     breakdownOverride?: string | null
     measureOverride?: string | null
     chartType?: AnalyticsChartType
@@ -380,7 +385,6 @@ export function AnalyticsDashboardPage() {
   const result = query.data
   const grid = dataQuery.data
   const compareResult = compareQuery.data
-  const totalRows = grid?.totalCount ?? 0
   const isDraft = item.status === 'draft'
   const charts = mergeCharts(item, result, compareResult)
   const mapPoints = mapQuery.data?.mapPoints ?? []
@@ -435,184 +439,216 @@ export function AnalyticsDashboardPage() {
     }
   }
 
+  const sourceLabel =
+    result?.source === 'mongo'
+      ? t('analyticsSourceMongo')
+      : result?.source === 'sqlserver'
+        ? t('analyticsSourceSqlServer')
+        : result?.source === 'live'
+          ? t('analyticsSourceLive')
+          : null
+
   return (
-    <section className="analytics-stage">
-      <div className="analytics-stage-glow" aria-hidden="true" />
-
-      <header className="analytics-hero">
-        <div className="analytics-hero-copy">
-          <div className="analytics-hero-kicker">
-            <span className="analytics-pulse" aria-hidden="true" />
-            {isDraft ? t('analyticsDraftPreview') : t('analyticsLiveBadge')}
-            {result?.source && (
-              <span
-                className={`analytics-source-badge analytics-source-${result.source === 'live' ? 'live' : 'cache'}`}
-                title={
-                  result.elapsedMs !== undefined
-                    ? t('analyticsSourceElapsed', { ms: result.elapsedMs.toLocaleString() })
-                    : undefined
-                }
-                data-testid="analytics-source-badge"
-              >
-                <span className="analytics-source-dot" aria-hidden="true" />
-                {result.source === 'mongo'
-                  ? t('analyticsSourceMongo')
-                  : result.source === 'sqlserver'
-                    ? t('analyticsSourceSqlServer')
-                    : t('analyticsSourceLive')}
-              </span>
-            )}
+    <section className={`analytics-stage ax-view${query.isFetching ? ' is-refreshing' : ''}`}>
+      <header className="ax-top">
+        <div className="ax-top-title">
+          <Link className="ax-back" to="/analytics">
+            {t('back')}
+          </Link>
+          <div>
+            <h1>{title}</h1>
+            {description && <p>{description}</p>}
           </div>
-          <h1>{title}</h1>
-          {description && <p className="analytics-hero-lede">{description}</p>}
-          <FilterBreadcrumbs
-            crumbs={crumbs}
-            emptyLabel={t('analyticsNoSelections')}
-            locked={view.locked}
-            onRemove={(dimensionId, value) => {
-              if (view.locked.includes(dimensionId)) {
-                return
-              }
-              toggleValue(dimensionId, value)
-            }}
-            onClearGroup={(dimensionId, state) => {
-              if (view.locked.includes(dimensionId)) {
-                return
-              }
-              patchView((current) => ({
-                ...current,
-                [state]: clearDimension(current[state], dimensionId),
-              }))
-            }}
-            onClearAll={() =>
-              patchView((current) => ({
-                ...current,
-                default: clearSelections(current.locked, current.default),
-                compare: clearSelections(current.locked, current.compare),
-              }))
-            }
-          />
         </div>
-
-        <div className="analytics-hero-aside">
-          <div className="analytics-stat-pills">
-            <div className="analytics-stat-pill">
-              <span>{t('analyticsStatSelections')}</span>
-              <strong>{crumbs.length}</strong>
-            </div>
-            <div className="analytics-stat-pill">
-              <span>{t('analyticsStatAssociated')}</span>
-              <strong>{associatedCount.toLocaleString()}</strong>
-            </div>
-            <div className="analytics-stat-pill">
-              <span>{t('analyticsStatRows')}</span>
-              <strong>{totalRows.toLocaleString()}</strong>
-            </div>
-          </div>
-          <div className="analytics-hero-actions">
+        <div className="ax-top-actions">
+          {sourceLabel && (
+            <span
+              className={`analytics-source-badge analytics-source-${result?.source === 'live' ? 'live' : 'cache'}`}
+              title={
+                result?.elapsedMs !== undefined
+                  ? t('analyticsSourceElapsed', { ms: result.elapsedMs.toLocaleString() })
+                  : undefined
+              }
+              data-testid="analytics-source-badge"
+            >
+              <span className="analytics-source-dot" aria-hidden="true" />
+              {sourceLabel}
+            </span>
+          )}
+          {isDraft && <span className="badge draft">{t('analyticsDraftPreview')}</span>}
+          <div className="ax-menu">
             <button
               type="button"
-              className="analytics-btn ghost"
-              disabled={crumbs.length === 0}
-              onClick={() =>
-                patchView((current) => ({
-                  ...current,
-                  default: clearSelections(current.locked, current.default),
-                  compare: clearSelections(current.locked, current.compare),
-                }))
-              }
+              className={`analytics-btn ghost${menu === 'bookmarks' ? ' is-on' : ''}`}
+              aria-expanded={menu === 'bookmarks'}
+              onClick={() => setMenu((current) => (current === 'bookmarks' ? null : 'bookmarks'))}
             >
-              {t('analyticsClearSelections')}
+              <IconBookmark />
+              {t('analyticsBookmarks')}
+              {bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
             </button>
-            <button type="button" className="analytics-btn ghost" onClick={() => void copyLink()}>
-              {copyFlash ? t('analyticsLinkCopied') : t('analyticsCopyLink')}
-            </button>
-            <AnalyticsExportMenu
-              pending={exportCsv.isPending || screenExporting}
-              onExport={(kind) => {
-                void exportDashboard(kind)
-              }}
-            />
-            {item.canEdit && (
-              <Link className="analytics-btn ghost" to={`/analytics/${item.id}`}>
-                <IconEdit />
-                {t('edit')}
-              </Link>
+            {menu === 'bookmarks' && (
+              <div className="ax-menu-panel">
+                <BookmarkBar
+                  bookmarks={bookmarks}
+                  name={bookmarkName}
+                  onName={setBookmarkName}
+                  saveLabel={t('analyticsSaveBookmark')}
+                  emptyLabel={t('analyticsNoBookmarks')}
+                  heading={t('analyticsBookmarks')}
+                  nameLabel={t('analyticsBookmarkName')}
+                  onSave={() => {
+                    if (!id || !bookmarkName.trim()) {
+                      return
+                    }
+                    setBookmarks(createBookmark(id, bookmarkName, view))
+                    setBookmarkName('')
+                  }}
+                  onApply={(bookmark) => {
+                    setSkip(0)
+                    patchChrome({ breakdownOverride: null })
+                    setView(reconcileDrill(normalizeViewState(bookmark.view)))
+                    setMenu(null)
+                  }}
+                  onDelete={(bookmarkId) => {
+                    if (!id) return
+                    setBookmarks(deleteBookmark(id, bookmarkId))
+                  }}
+                />
+              </div>
             )}
-            <Link className="analytics-btn solid" to="/analytics">
-              {t('back')}
-            </Link>
           </div>
+          <button type="button" className="analytics-btn ghost" onClick={() => void copyLink()}>
+            {copyFlash ? t('analyticsLinkCopied') : t('analyticsCopyLink')}
+          </button>
+          <AnalyticsExportMenu
+            pending={exportCsv.isPending || screenExporting}
+            onExport={(kind) => {
+              void exportDashboard(kind)
+            }}
+          />
+          {item.canEdit && (
+            <Link className="analytics-btn ghost" to={`/analytics/${item.id}`}>
+              <IconEdit />
+              {t('edit')}
+            </Link>
+          )}
         </div>
       </header>
 
       {isDraft && <div className="banner analytics-draft-banner">{t('analyticsDraftBanner')}</div>}
 
-      <div className="analytics-chrome">
-        <div className="analytics-legend" aria-label={t('analyticsLegend')}>
-          <span className="analytics-legend-item selected">
-            <i />
-            {t('analyticsStateSelected')}
-          </span>
-          <span className="analytics-legend-item associated">
-            <i />
-            {t('analyticsStateAssociated')}
-          </span>
-          <span className="analytics-legend-item excluded">
-            <i />
-            {t('analyticsStateExcluded')}
-          </span>
-        </div>
+      <div className="ax-filters">
         <AnalyticsSmartSearch
           dimensions={result?.dimensions ?? []}
           nullLabel={t('analyticsNullValue')}
           onSelect={toggleValue}
           onSearch={id ? searchValues : undefined}
         />
+        <div className="ax-slicers">
+          {item.config.dimensions.map((dimension) => {
+            const state = resolveDimState(view.dimStates, dimension.id)
+            const source = state === 'compare' ? compareResult : result
+            const selected = (state === 'compare' ? view.compare : view.default)[dimension.id] ?? []
+            const data = source?.dimensions.find((item) => item.dimensionId === dimension.id) ?? {
+              dimensionId: dimension.id,
+              label: dimension.label,
+              selectedValues: selected,
+              values: [],
+            }
+            const locked = view.locked.includes(dimension.id)
+            const summary =
+              selected.length === 0
+                ? t('analyticsAny')
+                : selected.length === 1
+                  ? selected[0] === ANALYTICS_NULL
+                    ? t('analyticsNullValue')
+                    : selected[0]
+                  : t('analyticsSelectedCount', { n: selected.length })
+            return (
+              <Slicer
+                key={dimension.id}
+                label={dimension.label || dimension.field}
+                summary={summary}
+                active={selected.length > 0}
+                locked={locked}
+                open={menu === dimension.id}
+                onOpen={() => setMenu(dimension.id)}
+                onClose={() => setMenu((current) => (current === dimension.id ? null : current))}
+              >
+                <DimensionWidget
+                  dimension={data}
+                  search=""
+                  state={state}
+                  locked={locked}
+                  onToggle={(value) => toggleValue(dimension.id, value)}
+                  onDrill={(value) => focusDrill(dimension.id, value)}
+                  onSelectMatching={(values) => {
+                    if (locked) return
+                    patchView((current) => ({
+                      ...current,
+                      [state]: selectValues(current[state], dimension.id, values),
+                    }))
+                  }}
+                  onClear={() => {
+                    if (locked) return
+                    patchView((current) => ({
+                      ...current,
+                      [state]: clearDimension(current[state], dimension.id),
+                    }))
+                  }}
+                  onLock={() =>
+                    setView((current) => ({
+                      ...current,
+                      locked: toggleLocked(current.locked, dimension.id),
+                    }))
+                  }
+                  onState={(next) => patchView((current) => moveDimensionState(current, dimension.id, next))}
+                  emptyLabel={t('analyticsNoDimensionValues')}
+                  nullLabel={t('analyticsNullValue')}
+                  selectMatchingLabel={t('analyticsSelectMatching')}
+                  clearLabel={t('analyticsClearDim')}
+                  lockLabel={locked ? t('analyticsUnlockDim') : t('analyticsLockDim')}
+                  searchLabel={t('analyticsFilterDim')}
+                  drillLabel={t('analyticsDrillInto', { label: dimension.label || dimension.field })}
+                  defaultStateLabel="A"
+                  compareStateLabel="B"
+                />
+              </Slicer>
+            )
+          })}
+        </div>
         <button
           type="button"
-          className={`analytics-btn ghost${railOpen ? ' is-on' : ''}`}
-          aria-pressed={railOpen}
-          onClick={() => patchChrome({ railOpen: !railOpen })}
+          className="analytics-btn ghost"
+          disabled={crumbs.length === 0}
+          onClick={clearAllFilters}
         >
-          {railOpen ? t('analyticsHideDimensions') : t('analyticsShowDimensions')}
-        </button>
-        <button
-          type="button"
-          className={`analytics-btn ghost${bookmarksOpen ? ' is-on' : ''}`}
-          onClick={() => setBookmarksOpen((value) => !value)}
-        >
-          <IconBookmark />
-          {t('analyticsBookmarks')}
-          {bookmarks.length > 0 ? ` · ${bookmarks.length}` : ''}
+          {t('analyticsClearSelections')}
         </button>
       </div>
 
-      {bookmarksOpen && (
-      <BookmarkBar
-        bookmarks={bookmarks}
-        name={bookmarkName}
-        onName={setBookmarkName}
-        saveLabel={t('analyticsSaveBookmark')}
-        emptyLabel={t('analyticsNoBookmarks')}
-        heading={t('analyticsBookmarks')}
-        nameLabel={t('analyticsBookmarkName')}
-        onSave={() => {
-          if (!id || !bookmarkName.trim()) {
+      {crumbs.length > 0 && (
+      <FilterBreadcrumbs
+        crumbs={crumbs}
+        emptyLabel={t('analyticsNoSelections')}
+        locked={view.locked}
+        onRemove={(dimensionId, value) => {
+          if (view.locked.includes(dimensionId)) {
             return
           }
-          setBookmarks(createBookmark(id, bookmarkName, view))
-          setBookmarkName('')
+          toggleValue(dimensionId, value)
         }}
-        onApply={(bookmark) => {
-          setSkip(0)
-          patchChrome({ breakdownOverride: null })
-          setView(reconcileDrill(normalizeViewState(bookmark.view)))
+        onClearGroup={(dimensionId, state) => {
+          if (view.locked.includes(dimensionId)) {
+            return
+          }
+          patchView((current) => ({
+            ...current,
+            [state]: clearDimension(current[state], dimensionId),
+          }))
         }}
-        onDelete={(bookmarkId) => {
-          if (!id) return
-          setBookmarks(deleteBookmark(id, bookmarkId))
-        }}
+        onClearAll={clearAllFilters}
       />
       )}
 
@@ -626,84 +662,36 @@ export function AnalyticsDashboardPage() {
         </div>
       )}
 
-      <div
-        className={`analytics-workspace${query.isFetching ? ' is-refreshing' : ''}${railOpen ? '' : ' is-rail-collapsed'}`}
-        aria-busy={query.isFetching}
-      >
-        <aside className="analytics-rail">
-          <div className="analytics-rail-head">
-            <h2>{t('analyticsDimensionsTitle')}</h2>
-            <input
-              className="analytics-rail-search"
-              value={dimSearch}
-              onChange={(event) => setDimSearch(event.target.value)}
-              placeholder={t('analyticsFilterValues')}
-            />
-          </div>
-          {query.isLoading && !result ? (
-            <Spinner label={t('loading')} />
-          ) : (item.config.dimensions.length ?? 0) === 0 ? (
-            <div className="analytics-empty-block">{t('analyticsNoDimensions')}</div>
+      <div className="analytics-canvas ax-board" aria-busy={query.isFetching}>
+          {configuredMeasures === 0 && (result?.measures.length ?? 0) === 0 ? (
+            <div className="analytics-empty-block">{t('analyticsNoMeasures')}</div>
           ) : (
-            <div className="analytics-dimension-mosaic">
-              {item.config.dimensions.map((dimension, index) => {
-                const state = resolveDimState(view.dimStates, dimension.id)
-                const source = state === 'compare' ? compareResult : result
-                const data = source?.dimensions.find((item) => item.dimensionId === dimension.id) ?? {
-                  dimensionId: dimension.id,
-                  label: dimension.label,
-                  selectedValues: (state === 'compare' ? view.compare : view.default)[dimension.id] ?? [],
-                  values: [],
-                }
-                const locked = view.locked.includes(dimension.id)
-                return (
-                  <DimensionWidget
-                    key={dimension.id}
-                    dimension={data}
-                    search={dimSearch}
-                    state={state}
-                    locked={locked}
-                    style={{ animationDelay: `${index * 45}ms` }}
-                    onToggle={(value) => toggleValue(dimension.id, value)}
-                    onDrill={(value) => focusDrill(dimension.id, value)}
-                    onSelectMatching={(values) => {
-                      if (locked) return
-                      patchView((current) => ({
-                        ...current,
-                        [state]: selectValues(current[state], dimension.id, values),
-                      }))
-                    }}
-                    onClear={() => {
-                      if (locked) return
-                      patchView((current) => ({
-                        ...current,
-                        [state]: clearDimension(current[state], dimension.id),
-                      }))
-                    }}
-                    onLock={() =>
-                      setView((current) => ({
-                        ...current,
-                        locked: toggleLocked(current.locked, dimension.id),
-                      }))
-                    }
-                    onState={(next) => patchView((current) => moveDimensionState(current, dimension.id, next))}
-                    emptyLabel={t('analyticsNoDimensionValues')}
-                    nullLabel={t('analyticsNullValue')}
-                    selectMatchingLabel={t('analyticsSelectMatching')}
-                    clearLabel={t('analyticsClearDim')}
-                    lockLabel={locked ? t('analyticsUnlockDim') : t('analyticsLockDim')}
-                    searchLabel={t('analyticsFilterDim')}
-                    drillLabel={t('analyticsDrillInto', { label: dimension.label || dimension.field })}
-                    defaultStateLabel="A"
-                    compareStateLabel="B"
-                  />
-                )
-              })}
+            <div className="analytics-kpi-strip">
+              {firstLoad
+                ? Array.from({ length: configuredMeasures || 3 }, (_, index) => (
+                    <KpiCard key={`skeleton-${index}`} skeleton />
+                  ))
+                : result!.measures.map((measure, index) => (
+                    <KpiCard
+                      key={measure.measureId}
+                      measure={measure}
+                      style={{ animationDelay: `${index * 60}ms` }}
+                    />
+                  ))}
             </div>
           )}
-        </aside>
 
-        <div className="analytics-canvas">
+          {hasCompare && (compareResult?.measures.length ?? 0) > 0 && (
+            <div>
+              <h2 className="analytics-section-title">{t('analyticsCompareKpis')}</h2>
+              <div className="analytics-kpi-strip">
+                {compareResult!.measures.map((measure) => (
+                  <KpiCard key={`c-${measure.measureId}`} measure={measure} compare />
+                ))}
+              </div>
+            </div>
+          )}
+
           {item.config.dimensions.length > 0 && (
             <DrillCanvas
               dimensions={item.config.dimensions.map((dimension) => ({
@@ -739,35 +727,6 @@ export function AnalyticsDashboardPage() {
             />
           )}
 
-          {configuredMeasures === 0 && (result?.measures.length ?? 0) === 0 ? (
-            <div className="analytics-empty-block">{t('analyticsNoMeasures')}</div>
-          ) : (
-            <div className="analytics-kpi-strip">
-              {firstLoad
-                ? Array.from({ length: configuredMeasures || 3 }, (_, index) => (
-                    <KpiCard key={`skeleton-${index}`} skeleton />
-                  ))
-                : result!.measures.map((measure, index) => (
-                    <KpiCard
-                      key={measure.measureId}
-                      measure={measure}
-                      style={{ animationDelay: `${index * 60}ms` }}
-                    />
-                  ))}
-            </div>
-          )}
-
-          {hasCompare && (compareResult?.measures.length ?? 0) > 0 && (
-            <div>
-              <h2 className="analytics-section-title">{t('analyticsCompareKpis')}</h2>
-              <div className="analytics-kpi-strip">
-                {compareResult!.measures.map((measure) => (
-                  <KpiCard key={`c-${measure.measureId}`} measure={measure} compare />
-                ))}
-              </div>
-            </div>
-          )}
-
           {firstLoad && configuredCharts > 0 && (
             <div className="analytics-chart-grid">
               {Array.from({ length: configuredCharts }, (_, index) => (
@@ -779,10 +738,18 @@ export function AnalyticsDashboardPage() {
             </div>
           )}
 
-          {!firstLoad && charts.length > 0 && (
+          {!firstLoad &&
+            charts.some(
+              (chart) =>
+                chart.dimensionId !== breakdownId ||
+                chart.measureId !== measureId ||
+                chart.state === 'compare',
+            ) && (
             <div className="analytics-chart-grid">
               {charts.map((chart) =>
-                chart.points.length === 0 ? (
+                (chart.dimensionId === breakdownId &&
+                  chart.measureId === measureId &&
+                  chart.state !== 'compare') ? null : chart.points.length === 0 ? (
                   <article key={chart.chartId} className="analytics-chart-card">
                     <header>
                       <h3>{chart.title}</h3>
@@ -795,20 +762,6 @@ export function AnalyticsDashboardPage() {
                     chart={chart}
                     nullLabel={t('analyticsNullValue')}
                     onSelect={(value) => toggleValue(chart.dimensionId, value)}
-                    exploreLabel={t('analyticsDrillExplore')}
-                    onExplore={() => {
-                      patchChrome({
-                        breakdownOverride: chart.dimensionId,
-                        ...(chart.measureId ? { measureOverride: chart.measureId } : {}),
-                        ...(chart.type === 'bar' || chart.type === 'line' || chart.type === 'pie'
-                          ? { chartType: chart.type }
-                          : {}),
-                      })
-                      document.getElementById('analytics-drill')?.scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'nearest',
-                      })
-                    }}
                   />
                 ),
               )}
@@ -879,7 +832,6 @@ export function AnalyticsDashboardPage() {
                 .join(' · ')}
             />
           </div>
-        </div>
       </div>
     </section>
   )
@@ -919,6 +871,64 @@ function mergeCharts(
         .map((item) => ({ value: item.value, metric: item.count })),
     },
   ]
+}
+
+function Slicer({
+  label,
+  summary,
+  active,
+  locked,
+  open,
+  onOpen,
+  onClose,
+  children,
+}: {
+  label: string
+  summary: string
+  active: boolean
+  locked: boolean
+  open: boolean
+  onOpen: () => void
+  onClose: () => void
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+    const onPointer = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) {
+        onClose()
+      }
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+    document.addEventListener('pointerdown', onPointer)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onPointer)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open, onClose])
+
+  return (
+    <div className={`ax-slicer${open ? ' is-open' : ''}${active ? ' is-active' : ''}${locked ? ' is-locked' : ''}`} ref={ref}>
+      <button
+        type="button"
+        className="ax-slicer-btn"
+        aria-expanded={open}
+        onClick={() => (open ? onClose() : onOpen())}
+      >
+        <small>{label}</small>
+        <strong>{summary}</strong>
+      </button>
+      {open && <div className="ax-slicer-panel">{children}</div>}
+    </div>
+  )
 }
 
 function BookmarkBar({
