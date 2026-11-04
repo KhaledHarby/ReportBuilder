@@ -4,11 +4,18 @@ export type AnalyticsSelections = Record<string, string[]>
 
 export type AnalyticsSelectionState = 'default' | 'compare'
 
+export type AnalyticsDrillStep = {
+  dimensionId: string
+  value: string
+}
+
 export type AnalyticsViewState = {
   default: AnalyticsSelections
   compare: AnalyticsSelections
   locked: string[]
   dimStates: Record<string, AnalyticsSelectionState>
+  /** Ordered focus path. Each step is a single selected value the viewer drilled into. */
+  drill: AnalyticsDrillStep[]
 }
 
 export const ANALYTICS_NULL = '__RB_NULL__'
@@ -18,7 +25,29 @@ export function emptySelections(): AnalyticsSelections {
 }
 
 export function emptyViewState(): AnalyticsViewState {
-  return { default: {}, compare: {}, locked: [], dimStates: {} }
+  return { default: {}, compare: {}, locked: [], dimStates: {}, drill: [] }
+}
+
+export function normalizeViewState(
+  view: Partial<AnalyticsViewState> | null | undefined,
+): AnalyticsViewState {
+  const drill = Array.isArray(view?.drill)
+    ? view.drill.filter(
+        (step): step is AnalyticsDrillStep =>
+          Boolean(step) &&
+          typeof step.dimensionId === 'string' &&
+          typeof step.value === 'string' &&
+          step.dimensionId.trim().length > 0 &&
+          step.value.length > 0,
+      )
+    : []
+  return {
+    default: view?.default ?? {},
+    compare: view?.compare ?? {},
+    locked: Array.isArray(view?.locked) ? view.locked.filter((id) => typeof id === 'string') : [],
+    dimStates: view?.dimStates ?? {},
+    drill,
+  }
 }
 
 export function cloneSelections(selections: AnalyticsSelections): AnalyticsSelections {
@@ -170,17 +199,43 @@ function parseSelectionMap(value: unknown): AnalyticsSelections {
   return result
 }
 
+function parseDrill(value: unknown): AnalyticsDrillStep[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const steps: AnalyticsDrillStep[] = []
+  for (const item of value) {
+    if (!Array.isArray(item) || item.length < 2) {
+      continue
+    }
+    const dimensionId = item[0]
+    const stepValue = item[1]
+    if (typeof dimensionId !== 'string' || typeof stepValue !== 'string') {
+      continue
+    }
+    const id = dimensionId.trim()
+    if (!id || stepValue.length === 0) {
+      continue
+    }
+    steps.push({ dimensionId: id, value: stepValue })
+  }
+  return steps
+}
+
 export function encodeViewState(view: AnalyticsViewState): string {
+  const drill = (view.drill ?? []).filter((step) => step.dimensionId && step.value)
   const payload = {
     d: compactSelections(view.default),
     c: compactSelections(view.compare),
     l: view.locked.filter(Boolean),
     s: view.dimStates,
+    p: drill.map((step) => [step.dimensionId, step.value]),
   }
   const hasCompare = Object.keys(payload.c).length > 0
   const hasLocked = payload.l.length > 0
   const hasStates = Object.values(payload.s).some((item) => item === 'compare')
-  if (!hasCompare && !hasLocked && !hasStates) {
+  const hasDrill = payload.p.length > 0
+  if (!hasCompare && !hasLocked && !hasStates && !hasDrill) {
     return encodeSelections(view.default)
   }
   return toBase64Url(JSON.stringify(payload))
@@ -214,6 +269,7 @@ export function decodeViewState(raw: string | null | undefined): AnalyticsViewSt
           ? parsed.l.filter((item): item is string => typeof item === 'string')
           : [],
         dimStates,
+        drill: parseDrill(parsed.p),
       }
     }
     return {
@@ -221,6 +277,7 @@ export function decodeViewState(raw: string | null | undefined): AnalyticsViewSt
       compare: {},
       locked: [],
       dimStates: {},
+      drill: [],
     }
   } catch {
     return emptyViewState()

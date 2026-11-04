@@ -4,6 +4,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, isSessionExpired } from '../api/client'
 import type {
   AnalyticsChartResult,
+  AnalyticsChartType,
   AnalyticsDashboardDetail,
   AnalyticsDimensionResult,
   AnalyticsDimensionValue,
@@ -12,11 +13,12 @@ import type {
   AnalyticsSnapshotResult,
   AnalyticsSelectionState,
 } from '../api/types'
+import { AnalyticsDrilldown } from '../components/AnalyticsDrilldown'
 import { AnalyticsExportMenu, type AnalyticsExportKind } from '../components/AnalyticsExportMenu'
 import { AnalyticsMapView } from '../components/AnalyticsMapView'
 import { AnalyticsMiniChart } from '../components/AnalyticsMiniChart'
 import { AnalyticsSmartSearch } from '../components/AnalyticsSmartSearch'
-import { IconBookmark, IconEdit, IconFilter, IconLock, IconUnlock } from '../components/Icons'
+import { IconBookmark, IconDrill, IconEdit, IconFilter, IconLock, IconUnlock } from '../components/Icons'
 import { Spinner } from '../components/Spinner'
 import { useLocale } from '../i18n/LocaleProvider'
 import { localizedText } from '../i18n/localized'
@@ -40,6 +42,7 @@ import {
   interpolateUrl,
   maxDimensionCount,
   moveDimensionState,
+  normalizeViewState,
   resolveDimState,
   selectValues,
   selectionEntries,
@@ -47,6 +50,15 @@ import {
   toggleSelection,
   type AnalyticsViewState,
 } from '../lib/analyticsFilters'
+import {
+  DRILL_CHART_ID,
+  drillAtLeaf,
+  drillInto,
+  drillToLevel,
+  nextBreakdownDimension,
+  reconcileDrill,
+  resolveDrillSeries,
+} from '../lib/analyticsDrill'
 import { exportAnalyticsPdf, exportAnalyticsPptx } from '../lib/analyticsExport'
 
 const PAGE_SIZE = 50
@@ -60,8 +72,35 @@ export function AnalyticsDashboardPage() {
   const { lang, t } = useLocale()
   const [searchParams, setSearchParams] = useSearchParams()
   const [view, setView] = useState<AnalyticsViewState>(() =>
-    decodeViewState(searchParams.get('sel')),
+    reconcileDrill(decodeViewState(searchParams.get('sel'))),
   )
+  const [drillChrome, setDrillChrome] = useState<{
+    dashboardId: string | undefined
+    railOpen: boolean
+    breakdownOverride: string | null
+    measureOverride: string | null
+    chartType: AnalyticsChartType
+  }>(() => ({
+    dashboardId: id,
+    railOpen: true,
+    breakdownOverride: null,
+    measureOverride: null,
+    chartType: 'bar',
+  }))
+  const chrome =
+    drillChrome.dashboardId === id
+      ? drillChrome
+      : {
+          dashboardId: id,
+          railOpen: true,
+          breakdownOverride: null,
+          measureOverride: null,
+          chartType: 'bar' as const,
+        }
+  const railOpen = chrome.railOpen
+  const breakdownOverride = chrome.breakdownOverride
+  const measureOverride = chrome.measureOverride
+  const drillChartType = chrome.chartType
   const [skip, setSkip] = useState(0)
   const [dimSearch, setDimSearch] = useState('')
   const [copyFlash, setCopyFlash] = useState(false)
@@ -87,13 +126,47 @@ export function AnalyticsDashboardPage() {
     Object.values(view.dimStates).some((item) => item === 'compare') ||
     (dashboard.data?.config.charts ?? []).some((chart) => chart.state === 'compare')
 
+  const dimensionIds = useMemo(
+    () => dashboard.data?.config.dimensions.map((dimension) => dimension.id) ?? [],
+    [dashboard.data],
+  )
+  const measureIds = useMemo(
+    () => dashboard.data?.config.measures.map((measure) => measure.id) ?? [],
+    [dashboard.data],
+  )
+  const suggestedBreakdown = nextBreakdownDimension(dimensionIds, view.drill ?? [])
+  const breakdownId =
+    breakdownOverride && dimensionIds.includes(breakdownOverride)
+      ? breakdownOverride
+      : suggestedBreakdown
+  const measureId =
+    measureOverride && measureIds.includes(measureOverride)
+      ? measureOverride
+      : (measureIds[0] ?? null)
+  const drillCovered = (dashboard.data?.config.charts ?? []).some(
+    (chart) =>
+      chart.dimensionId === breakdownId &&
+      chart.measureId === measureId &&
+      chart.state !== 'compare',
+  )
+  const serverDrill = Boolean(breakdownId && measureId && !drillCovered)
+
   const query = useQuery({
-    queryKey: ['analytics-query', id, view.default],
+    queryKey: [
+      'analytics-query',
+      id,
+      view.default,
+      serverDrill ? breakdownId : '',
+      serverDrill ? measureId : '',
+    ],
     queryFn: ({ signal }) =>
       api.queryAnalyticsDashboard(
         id!,
         {
           selections: view.default,
+          ...(serverDrill
+            ? { drillDimensionId: breakdownId ?? undefined, drillMeasureId: measureId ?? undefined }
+            : {}),
         },
         signal,
       ),
@@ -231,9 +304,23 @@ export function AnalyticsDashboardPage() {
     }
   }
 
+  function patchChrome(patch: {
+    railOpen?: boolean
+    breakdownOverride?: string | null
+    measureOverride?: string | null
+    chartType?: AnalyticsChartType
+  }) {
+    setDrillChrome({ ...chrome, ...patch, dashboardId: id })
+  }
+
   function patchView(updater: (current: AnalyticsViewState) => AnalyticsViewState) {
     setSkip(0)
-    setView(updater)
+    setView((current) => reconcileDrill(updater(current)))
+  }
+
+  function focusDrill(dimensionId: string, value: string) {
+    patchChrome({ breakdownOverride: null })
+    patchView((current) => drillInto(current, dimensionId, value))
   }
 
   function toggleValue(dimensionId: string, value: string) {
@@ -484,6 +571,14 @@ export function AnalyticsDashboardPage() {
         />
         <button
           type="button"
+          className={`analytics-btn ghost${railOpen ? ' is-on' : ''}`}
+          aria-pressed={railOpen}
+          onClick={() => patchChrome({ railOpen: !railOpen })}
+        >
+          {railOpen ? t('analyticsHideDimensions') : t('analyticsShowDimensions')}
+        </button>
+        <button
+          type="button"
           className={`analytics-btn ghost${bookmarksOpen ? ' is-on' : ''}`}
           onClick={() => setBookmarksOpen((value) => !value)}
         >
@@ -511,7 +606,8 @@ export function AnalyticsDashboardPage() {
         }}
         onApply={(bookmark) => {
           setSkip(0)
-          setView(bookmark.view)
+          patchChrome({ breakdownOverride: null })
+          setView(reconcileDrill(normalizeViewState(bookmark.view)))
         }}
         onDelete={(bookmarkId) => {
           if (!id) return
@@ -531,7 +627,7 @@ export function AnalyticsDashboardPage() {
       )}
 
       <div
-        className={`analytics-workspace${query.isFetching ? ' is-refreshing' : ''}`}
+        className={`analytics-workspace${query.isFetching ? ' is-refreshing' : ''}${railOpen ? '' : ' is-rail-collapsed'}`}
         aria-busy={query.isFetching}
       >
         <aside className="analytics-rail">
@@ -569,6 +665,7 @@ export function AnalyticsDashboardPage() {
                     locked={locked}
                     style={{ animationDelay: `${index * 45}ms` }}
                     onToggle={(value) => toggleValue(dimension.id, value)}
+                    onDrill={(value) => focusDrill(dimension.id, value)}
                     onSelectMatching={(values) => {
                       if (locked) return
                       patchView((current) => ({
@@ -596,6 +693,7 @@ export function AnalyticsDashboardPage() {
                     clearLabel={t('analyticsClearDim')}
                     lockLabel={locked ? t('analyticsUnlockDim') : t('analyticsLockDim')}
                     searchLabel={t('analyticsFilterDim')}
+                    drillLabel={t('analyticsDrillInto', { label: dimension.label || dimension.field })}
                     defaultStateLabel="A"
                     compareStateLabel="B"
                   />
@@ -606,6 +704,41 @@ export function AnalyticsDashboardPage() {
         </aside>
 
         <div className="analytics-canvas">
+          {item.config.dimensions.length > 0 && (
+            <DrillCanvas
+              dimensions={item.config.dimensions.map((dimension) => ({
+                id: dimension.id,
+                label: dimension.label || dimension.field,
+              }))}
+              measures={item.config.measures.map((measure) => ({
+                id: measure.id,
+                label: measure.label,
+              }))}
+              drill={view.drill ?? []}
+              breakdownId={breakdownId}
+              measureId={measureId}
+              chartType={drillChartType}
+              result={result}
+              firstLoad={firstLoad}
+              failed={query.isError}
+              serverDrill={serverDrill}
+              locked={Boolean(breakdownId && view.locked.includes(breakdownId))}
+              atLeaf={drillAtLeaf(dimensionIds, view.drill ?? [])}
+              onBreakdown={(dimensionId) => patchChrome({ breakdownOverride: dimensionId })}
+              onMeasure={(nextMeasure) => patchChrome({ measureOverride: nextMeasure })}
+              onChartType={(type) => patchChrome({ chartType: type })}
+              onDrill={(value) => {
+                if (breakdownId) {
+                  focusDrill(breakdownId, value)
+                }
+              }}
+              onDrillTo={(depth) => {
+                patchChrome({ breakdownOverride: null })
+                patchView((current) => drillToLevel(current, depth))
+              }}
+            />
+          )}
+
           {configuredMeasures === 0 && (result?.measures.length ?? 0) === 0 ? (
             <div className="analytics-empty-block">{t('analyticsNoMeasures')}</div>
           ) : (
@@ -662,6 +795,20 @@ export function AnalyticsDashboardPage() {
                     chart={chart}
                     nullLabel={t('analyticsNullValue')}
                     onSelect={(value) => toggleValue(chart.dimensionId, value)}
+                    exploreLabel={t('analyticsDrillExplore')}
+                    onExplore={() => {
+                      patchChrome({
+                        breakdownOverride: chart.dimensionId,
+                        ...(chart.measureId ? { measureOverride: chart.measureId } : {}),
+                        ...(chart.type === 'bar' || chart.type === 'line' || chart.type === 'pie'
+                          ? { chartType: chart.type }
+                          : {}),
+                      })
+                      document.getElementById('analytics-drill')?.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'nearest',
+                      })
+                    }}
                   />
                 ),
               )}
@@ -723,6 +870,13 @@ export function AnalyticsDashboardPage() {
               prevLabel={t('analyticsPrev')}
               nextLabel={t('analyticsNextPage')}
               rowFilterLabel={t('analyticsRowFilter')}
+              scope={(view.drill ?? [])
+                .map((step) => {
+                  const label = labels[step.dimensionId] ?? step.dimensionId
+                  const value = step.value === ANALYTICS_NULL ? t('analyticsNullValue') : step.value
+                  return `${label}: ${value}`
+                })
+                .join(' · ')}
             />
           </div>
         </div>
@@ -965,6 +1119,7 @@ function DimensionWidget({
   state,
   locked,
   onToggle,
+  onDrill,
   onSelectMatching,
   onClear,
   onLock,
@@ -975,6 +1130,7 @@ function DimensionWidget({
   clearLabel,
   lockLabel,
   searchLabel,
+  drillLabel,
   defaultStateLabel,
   compareStateLabel,
   style,
@@ -984,6 +1140,7 @@ function DimensionWidget({
   state: AnalyticsSelectionState
   locked: boolean
   onToggle: (value: string) => void
+  onDrill: (value: string) => void
   onSelectMatching: (values: string[]) => void
   onClear: () => void
   onLock: () => void
@@ -994,6 +1151,7 @@ function DimensionWidget({
   clearLabel: string
   lockLabel: string
   searchLabel: string
+  drillLabel: string
   defaultStateLabel: string
   compareStateLabel: string
   style?: CSSProperties
@@ -1088,7 +1246,9 @@ function DimensionWidget({
               max={max}
               nullLabel={nullLabel}
               disabled={locked}
+              drillLabel={drillLabel}
               onToggle={onToggle}
+              onDrill={onDrill}
             />
           ))}
         </ul>
@@ -1102,19 +1262,24 @@ function DimensionRow({
   max,
   nullLabel,
   disabled,
+  drillLabel,
   onToggle,
+  onDrill,
 }: {
   item: AnalyticsDimensionValue
   max: number
   nullLabel: string
   disabled: boolean
+  drillLabel: string
   onToggle: (value: string) => void
+  onDrill: (value: string) => void
 }) {
   const width = max <= 0 ? 0 : Math.max(6, Math.round((item.count / max) * 100))
   const label = item.value === ANALYTICS_NULL ? nullLabel : item.value
+  const canDrill = !disabled && item.state !== 'excluded'
   return (
     <li className={`analytics-dim-row ${item.state}`}>
-      <button type="button" disabled={disabled} onClick={() => onToggle(item.value)}>
+      <button type="button" className="analytics-dim-hit" disabled={disabled} onClick={() => onToggle(item.value)}>
         <span className="analytics-dim-label" title={label}>
           {label}
         </span>
@@ -1123,7 +1288,97 @@ function DimensionRow({
         </span>
         <span className="analytics-dim-count">{item.count.toLocaleString()}</span>
       </button>
+      <button
+        type="button"
+        className="analytics-dim-drill"
+        disabled={!canDrill}
+        title={drillLabel}
+        aria-label={drillLabel}
+        onClick={() => onDrill(item.value)}
+      >
+        <IconDrill />
+      </button>
     </li>
+  )
+}
+
+function DrillCanvas({
+  dimensions,
+  measures,
+  drill,
+  breakdownId,
+  measureId,
+  chartType,
+  result,
+  firstLoad,
+  failed,
+  serverDrill,
+  locked,
+  atLeaf,
+  onBreakdown,
+  onMeasure,
+  onChartType,
+  onDrill,
+  onDrillTo,
+}: {
+  dimensions: { id: string; label: string }[]
+  measures: { id: string; label: string }[]
+  drill: AnalyticsViewState['drill']
+  breakdownId: string | null
+  measureId: string | null
+  chartType: AnalyticsChartType
+  result: AnalyticsSnapshotResult | undefined
+  firstLoad: boolean
+  failed: boolean
+  serverDrill: boolean
+  locked: boolean
+  atLeaf: boolean
+  onBreakdown: (dimensionId: string) => void
+  onMeasure: (measureId: string) => void
+  onChartType: (type: AnalyticsChartType) => void
+  onDrill: (value: string) => void
+  onDrillTo: (depth: number) => void
+}) {
+  const drillReady =
+    !serverDrill ||
+    (result?.charts ?? []).some(
+      (chart) =>
+        chart.chartId === DRILL_CHART_ID &&
+        chart.dimensionId === breakdownId &&
+        chart.measureId === measureId,
+    )
+  const series = breakdownId
+    ? resolveDrillSeries({
+        dimensionId: breakdownId,
+        measureId,
+        dimensions: result?.dimensions ?? [],
+        charts: result?.charts,
+        serverDrill,
+      })
+    : { points: [], usesCount: true }
+  const selectedValues =
+    result?.dimensions.find((dimension) => dimension.dimensionId === breakdownId)?.selectedValues ?? []
+
+  return (
+    <AnalyticsDrilldown
+      dimensions={dimensions}
+      measures={measures}
+      drill={drill}
+      breakdownId={breakdownId}
+      measureId={measureId}
+      chartType={chartType}
+      points={series.points}
+      usesCount={series.usesCount}
+      loading={Boolean(breakdownId) && !failed && (firstLoad || (serverDrill && !drillReady))}
+      locked={locked}
+      atLeaf={atLeaf}
+      selectedValues={selectedValues}
+      onBreakdown={onBreakdown}
+      onMeasure={onMeasure}
+      onChartType={onChartType}
+      onDrill={onDrill}
+      onDrillTo={onDrillTo}
+    />
   )
 }
 
@@ -1171,6 +1426,7 @@ function DetailDataGrid({
   prevLabel,
   nextLabel,
   rowFilterLabel,
+  scope,
 }: {
   result: AnalyticsDataResult | undefined
   loading: boolean
@@ -1186,6 +1442,7 @@ function DetailDataGrid({
   prevLabel: string
   nextLabel: string
   rowFilterLabel: string
+  scope?: string
 }) {
   const columns = result?.columns ?? []
   const rows = result?.rows ?? []
@@ -1204,6 +1461,7 @@ function DetailDataGrid({
             ) : (
               <>
                 {from}–{to} <span>/</span> {total.toLocaleString()}
+                {scope ? <> · {scope}</> : null}
               </>
             )}
           </p>

@@ -59,6 +59,10 @@ public sealed class AnalyticsQueryRequest
     public int Skip { get; set; }
     public int Take { get; set; } = 50;
     public bool? Track { get; set; }
+    /// <summary>When set with <see cref="DrillMeasureId"/>, the snapshot also returns an ad-hoc chart for drill-down.</summary>
+    public string? DrillDimensionId { get; set; }
+    /// <summary>Measure aggregated by <see cref="DrillDimensionId"/>. Ignored when either id is unknown.</summary>
+    public string? DrillMeasureId { get; set; }
 }
 
 public sealed class AnalyticsSnapshotResult

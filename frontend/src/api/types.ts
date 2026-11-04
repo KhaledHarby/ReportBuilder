@@ -992,6 +992,8 @@ export type AnalyticsQueryRequest = {
   skip?: number
   take?: number
   track?: boolean
+  drillDimensionId?: string
+  drillMeasureId?: string
 }
 
 export type AnalyticsValueSearchRequest = {
