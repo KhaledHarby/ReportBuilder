@@ -70,6 +70,8 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
         _useDocumentCache = configuration.GetValue("Analytics:UseDatasetCache", true);
     }
 
+    private const string DrillChartId = "__drill__";
+
     private sealed record Prepared(
         AnalyticsDashboard Dashboard,
         AnalyticsQueryBuilder.Context Context,
@@ -78,7 +80,8 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
         int Take,
         string StateKey,
         DocumentRoute? Document,
-        string Source)
+        string Source,
+        AnalyticsChart? DrillChart)
     {
         public bool ServedFromSnapshot => Source != AnalyticsDataSources.Live;
     }
@@ -96,10 +99,13 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
         CancellationToken cancellationToken = default)
     {
         var prepared = await PrepareAsync(dashboardId, request, cancellationToken);
+        var drillKey = prepared.DrillChart is null
+            ? string.Empty
+            : $"{prepared.DrillChart.DimensionId}:{prepared.DrillChart.MeasureId}";
         return await RunAsync(
             prepared,
             "snapshot",
-            discriminator: string.Empty,
+            discriminator: drillKey,
             (connection, ct) => ReadSnapshotAsync(connection, prepared, ct),
             (route, ct) => _mongo.QueryAnalyticsSnapshotAsync(
                 route.Connection,
@@ -109,6 +115,7 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
                 prepared.Selections,
                 CommandTimeout,
                 RecordDocumentQuery,
+                prepared.DrillChart,
                 ct),
             cancellationToken);
     }
@@ -346,6 +353,12 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
         {
             sections.Add(new Section(SectionKind.Chart, null, chart));
             batch.AppendLine().AppendLine(AnalyticsQueryBuilder.ChartSql(context, chart, selections, bag)).Append(';');
+        }
+
+        if (prepared.DrillChart is { } drillChart)
+        {
+            sections.Add(new Section(SectionKind.Chart, null, drillChart));
+            batch.AppendLine().AppendLine(AnalyticsQueryBuilder.ChartSql(context, drillChart, selections, bag)).Append(';');
         }
 
         var dimensions = new List<AnalyticsDimensionResult>(context.Config.Dimensions.Count);
@@ -755,7 +768,48 @@ public sealed class AnalyticsQueryService : IAnalyticsQueryService
             : metadata.Datasets.All(dataset => DatasetCacheRouting.TryGetCachedSource(dataset, out _, out _))
                 ? AnalyticsDataSources.SqlServerCache
                 : AnalyticsDataSources.Live;
-        return new Prepared(dashboard, context, selections, skip, take, stateKey, document, source);
+        return new Prepared(
+            dashboard,
+            context,
+            selections,
+            skip,
+            take,
+            stateKey,
+            document,
+            source,
+            ResolveDrillChart(metadata.Config, request));
+    }
+
+    /// <summary>
+    /// Builds the optional drill-down chart. Unknown ids are ignored so a stale link cannot fail the snapshot.
+    /// </summary>
+    private static AnalyticsChart? ResolveDrillChart(AnalyticsDashboardConfig config, AnalyticsQueryRequest request)
+    {
+        var dimensionId = request.DrillDimensionId?.Trim();
+        var measureId = request.DrillMeasureId?.Trim();
+        if (string.IsNullOrEmpty(dimensionId) || string.IsNullOrEmpty(measureId))
+        {
+            return null;
+        }
+
+        var dimension = config.Dimensions.FirstOrDefault(item =>
+            item.Id.Equals(dimensionId, StringComparison.OrdinalIgnoreCase));
+        var measure = config.Measures.FirstOrDefault(item =>
+            item.Id.Equals(measureId, StringComparison.OrdinalIgnoreCase));
+        if (dimension is null || measure is null)
+        {
+            return null;
+        }
+
+        return new AnalyticsChart
+        {
+            Id = DrillChartId,
+            Type = "bar",
+            DimensionId = dimension.Id,
+            MeasureId = measure.Id,
+            Title = string.IsNullOrWhiteSpace(dimension.Label) ? dimension.Field : dimension.Label,
+            State = "default"
+        };
     }
 
     /// <summary>

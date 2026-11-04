@@ -364,6 +364,15 @@ export function IconMenu({ className }: { className?: string }) {
   )
 }
 
+export function IconDrill({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 7h8M4 12h6M4 17h4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M14 8v8M14 16l3.5-3.5M14 16l-3.5-3.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function IconBookmark({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">

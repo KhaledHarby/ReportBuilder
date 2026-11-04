@@ -77,6 +77,7 @@ public sealed partial class MongoCacheClient
         Dictionary<string, List<string>> selections,
         TimeSpan maxTime,
         Action<string, string>? log,
+        AnalyticsChart? drillChart,
         CancellationToken cancellationToken)
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -109,12 +110,21 @@ public sealed partial class MongoCacheClient
         var chartTasks = config.Charts
             .Select(chart => ReadChartAsync(collection, plan, chart, cancellationToken))
             .ToList();
+        var drillTask = drillChart is null
+            ? null
+            : ReadChartAsync(collection, plan, drillChart, cancellationToken);
 
-        await Task.WhenAll(dimensionTasks
+        var pending = dimensionTasks
             .Cast<Task>()
             .Concat(distinctMeasures.Values)
             .Append(simpleTask)
-            .Concat(chartTasks));
+            .Concat(chartTasks);
+        if (drillTask is not null)
+        {
+            pending = pending.Append(drillTask);
+        }
+
+        await Task.WhenAll(pending);
 
         var dimensions = new List<AnalyticsDimensionResult>(config.Dimensions.Count);
         for (var index = 0; index < config.Dimensions.Count; index++)
@@ -167,6 +177,22 @@ public sealed partial class MongoCacheClient
                 MeasureId = chart.MeasureId,
                 State = chart.State.Equals("compare", StringComparison.OrdinalIgnoreCase) ? "compare" : "default",
                 Points = chartTasks[index].Result
+            });
+        }
+
+        if (drillChart is not null && drillTask is not null)
+        {
+            charts.Add(new AnalyticsChartResult
+            {
+                ChartId = drillChart.Id,
+                Title = string.IsNullOrWhiteSpace(drillChart.Title)
+                    ? drillChart.DimensionId
+                    : drillChart.Title,
+                Type = AnalyticsQueryService.NormalizeChartType(drillChart.Type),
+                DimensionId = drillChart.DimensionId,
+                MeasureId = drillChart.MeasureId,
+                State = "default",
+                Points = drillTask.Result
             });
         }
 
